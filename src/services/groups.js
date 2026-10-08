@@ -125,13 +125,13 @@ export function listGroups(db, campaign) {
  * industry and persona in simple language; without it, the campaign's base templates.
  * Messages are saved as proposals until the user approves the group.
  */
-export async function generateGroupMessages(db, { campaign, group, generateFn = generateVariants }) {
+export async function generateGroupMessages(db, { campaign, group, generateFn = generateVariants, forceTemplate = false }) {
   const steps = emailSteps(db, campaign.id);
   if (!steps.length) throw Object.assign(new Error('La campaña no tiene pasos de correo.'), { status: 400 });
   const brand = campaign.brand_id ? db.prepare('SELECT * FROM brands WHERE id = ?').get(campaign.brand_id) : null;
   const persona = group.persona_id ? db.prepare('SELECT * FROM personas WHERE id = ?').get(group.persona_id) : null;
   const segment = group.segment_id ? db.prepare('SELECT * FROM segments WHERE id = ?').get(group.segment_id) : null;
-  const useAI = Boolean(brand) && (generateFn !== generateVariants || openaiConfigured());
+  const useAI = !forceTemplate && Boolean(brand) && (generateFn !== generateVariants || openaiConfigured());
   const sample = db.prepare('SELECT fields_json FROM prospects WHERE campaign_id = ? LIMIT 1').get(campaign.id);
   const fields = Object.keys(JSON.parse(sample?.fields_json || '{}')).slice(0, 15);
   const created = [];

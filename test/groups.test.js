@@ -169,3 +169,70 @@ test('replies: an interested answer becomes a task with a suggested reply, sent 
   assert.equal((await request(app).get('/api/inbox').set(auth)).body.counts.replies, 0);
   assert.equal((await request(app).post(`/api/replies/${reply.id}/send`).set(auth).send({ body: 'otra vez' })).status, 400);
 });
+
+test('light flow: base + brand → automatic analysis and messages per group → approve → schedule', async () => {
+  let fail = true;
+  const generateFn = async (ctx) => {
+    // The first group fails (AI down): the flow falls back to templates instead of blocking.
+    if (fail) {
+      fail = false;
+      throw new Error('timeout');
+    }
+    return { model: 'fake', variants: [{ label: 'g', subject: ctx.stepNumber === 1 ? 'una idea para {{company}} este mes' : '', body: BODY('Hay capital de trabajo detenido en inventario.'), rationale: 'simple' }] };
+  };
+  const { app, db, scheduler, clock, gmail } = setup({ generateFn });
+  const { auth, userId } = await login(app);
+  const brand = (await request(app).post('/api/brands').set(auth).send({ name: 'QuantraIQ', value_proposition: 'Pronóstico de demanda', industries: 'Retail', personas: PERSONAS })).body.brand;
+  insertSender(db, userId);
+
+  // Step 1: only the file and the brand.
+  assert.equal((await request(app).post('/api/campaigns/quick').set(auth).field('brand_id', String(brand.id))).status, 400);
+  const created = await request(app).post('/api/campaigns/quick').set(auth)
+    .field('brand_id', String(brand.id)).field('timezone', 'America/Panama')
+    .attach('file', Buffer.from('email,nombre,empresa,cargo,sector\nana@tiendas.com,Ana,Tiendas SA,Demand Planner,Retail\neva@tiendas.com,Eva,Tiendas SA,CFO,Retail\nmal@,X,Y,Z,Retail\n'), 'mi-base.csv');
+  assert.equal(created.status, 201, created.body.error);
+  assert.equal(created.body.import.imported, 2);
+  const id = created.body.campaign_id;
+  const c = (await request(app).get(`/api/campaigns/${id}`).set(auth)).body.campaign;
+  assert.equal(c.approval_mode, 'group');
+  assert.equal(c.track_opens, false);
+  assert.equal(c.brand.id, brand.id);
+  assert.equal(c.sender_ids.length, 1);
+  assert.equal(c.steps.length, 4);
+  assert.match(c.name, /^QuantraIQ · /);
+  assert.equal(c.status, 'draft');
+
+  // Step 2: prepare in batches until done.
+  let prep;
+  const notices = [];
+  for (let i = 0; i < 10; i += 1) {
+    prep = (await request(app).post(`/api/campaigns/${id}/prepare`).set(auth)).body;
+    if (prep.notice) notices.push(prep.notice);
+    if (prep.done) break;
+  }
+  assert.equal(prep.done, true);
+  assert.equal(prep.ready, 2);
+  assert.equal(prep.groups, 2);
+  assert.equal(notices.length, 1);
+  const groups = (await request(app).get(`/api/campaigns/${id}/groups`).set(auth)).body.groups;
+  assert.ok(groups.every((g) => g.status === 'pending' && g.messages.every((m) => m.variants.length === 1)));
+  assert.deepEqual(groups.map((g) => g.messages[0].variants[0].origin).sort(), ['ai', 'manual']);
+
+  // Step 4 before approving anything is refused.
+  assert.equal((await request(app).post(`/api/campaigns/${id}/schedule`).set(auth).send({})).status, 400);
+  // Step 3: approve one group, reject (pause) the other.
+  await request(app).post(`/api/groups/${groups[0].id}/approve`).set(auth).expect(200);
+  await request(app).post(`/api/groups/${groups[1].id}/pause`).set(auth).expect(200);
+
+  // Step 4: schedule for tomorrow 09:00 Panama (14:00Z).
+  const sched = await request(app).post(`/api/campaigns/${id}/schedule`).set(auth).send({ start_at: '2026-10-08T14:00:00Z' });
+  assert.equal(sched.status, 200, sched.body.error);
+  assert.equal(sched.body.contacts, 1);
+  assert.equal(sched.body.campaign.status, 'active');
+  await scheduler.tick();
+  assert.equal(gmail.state.sent.length, 0);
+  clock.now = new Date('2026-10-08T14:05:00Z');
+  await scheduler.tick();
+  assert.equal(gmail.state.sent.length, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM messages').get().n, 1);
+});

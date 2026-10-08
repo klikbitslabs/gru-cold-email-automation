@@ -87,6 +87,15 @@ Sin clave de Jev, 1–3 se responden por coincidencia de palabras clave y, ante 
 
 **Empresas.** Los leads se agrupan por dominio corporativo (o nombre). La vista *Empresas* muestra el estado de cada cuenta y sus contactos en todas las campañas. Reglas por campaña: máximo de contactos por empresa (por defecto 3; el resto queda en reserva), días entre el primer correo a colegas y detener a los colegas cuando alguien de la empresa responde.
 
+## Crear una campaña en 4 pasos (+ Nueva campaña)
+
+1. **Base y marca**: subes tu CSV/Excel y eliges la marca. Nada más (nombre, origen y base legal son opcionales; hay valores por defecto).
+2. **Análisis**: la plataforma valida, responde las 5 preguntas por contacto, asigna perfil y grupo, y escribe los mensajes de cada grupo (IA si está configurada; si falla o no está, plantillas base). Ves el progreso.
+3. **Mensajes**: por cada grupo ves el primer correo y los seguimientos tal como los leerá una persona real. *✓ Aprobar*, *✗ No enviar*, *↻ Otra versión* o *✎ Editar*; o *Aprobar todos*.
+4. **Programar**: lo antes posible, mañana a las 8:00 o fecha y hora; ajustas el límite diario si quieres. Las reglas (L–V 8–17, 2 min entre correos, máx. 3 personas por empresa, sin pixel, baja de un clic) ya vienen puestas.
+
+Todo lo demás (secuencia, ganchos, CTAs, reglas, senders = tus correos conectados) se configura solo. La pantalla de la campaña y el *Modo avanzado* siguen disponibles para ajustes finos.
+
 ## Flujo simple: grupos, aprobación una vez y Tareas
 
 1. **Cargas la base** (CSV/Excel) en *Prospectos*. Cada lead se valida, se analiza y entra a un **grupo** automático (por defecto *industria × perfil*, p. ej. "Retail · Director Financiero"). El criterio se cambia en *Grupos y mensajes* (perfil, industria, segmento o un solo grupo) y puedes **unir** grupos.

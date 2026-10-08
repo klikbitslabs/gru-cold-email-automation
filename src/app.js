@@ -60,7 +60,7 @@ export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, genera
   app.use('/api/senders', senderRoutes(db, gmailFor ? { gmailFor } : {}));
   app.use('/api/brands', brandRoutes(db));
   app.use('/api/companies', companyRoutes(db));
-  app.use('/api/campaigns', campaignRoutes(db, inject({ decideFn, analyzeFn, now, mx })));
+  app.use('/api/campaigns', campaignRoutes(db, inject({ decideFn, analyzeFn, generateFn, now, mx })));
   app.use('/api', workRoutes(db, inject({ now, analyzeFn, generateFn })));
 
   app.get('/api/meta', (req, res) => {

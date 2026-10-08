@@ -6,14 +6,16 @@ import { nowIso } from '../db.js';
 import { randomToken } from '../lib/crypto.js';
 import { upsertCompany } from '../lib/company.js';
 import { parseProspectsFile } from '../lib/csv.js';
+import { QUICK_CTAS, QUICK_HOOKS, QUICK_PROBLEMS, QUICK_SCHEDULE, QUICK_SEQUENCE, QUICK_SETTINGS } from '../lib/defaults.js';
 import { checkDraft } from '../lib/quality.js';
 import { templateFields } from '../lib/template.js';
 import { campaignSchedule, isValidTimeZone } from '../lib/time.js';
 import { createMxChecker, LAWFUL_BASES, validateLeads } from '../lib/validate.js';
 import { requireAuth } from '../middleware/auth.js';
-import { regroupCampaign } from '../services/groups.js';
+import { generateGroupMessages, regroupCampaign } from '../services/groups.js';
 import { analyzeProspect, decide } from '../services/jev.js';
-import { candidatesFor, engagementFor, loadSequence, performanceStats, renderDraft } from '../services/scheduler.js';
+import { generateVariants } from '../services/openai.js';
+import { analyzeAndClassify, candidatesFor, engagementFor, loadSequence, performanceStats, renderDraft } from '../services/scheduler.js';
 
 const HHMM = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Formato HH:MM');
 const MAX_TOTAL_STEPS = 7;
@@ -117,7 +119,7 @@ const STAT_SQL = `
     (SELECT COUNT(*) FROM drafts WHERE campaign_id = @id AND status = 'pending') AS pending_approval,
     (SELECT COUNT(*) FROM tasks WHERE campaign_id = @id AND status = 'open') AS open_tasks`;
 
-export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProspect, now = () => new Date(), mx } = {}) {
+export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProspect, generateFn = generateVariants, now = () => new Date(), mx } = {}) {
   const router = Router();
   router.use(requireAuth(db));
 
@@ -381,20 +383,13 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
   // ---------------------------------------------------------------------------
   // Import + validation
   // ---------------------------------------------------------------------------
-  router.post('/:id/prospects/import', upload.single('file'), async (req, res) => {
-    const c = own(req);
-    if (!c) return res.status(404).json({ error: 'Campaña no encontrada' });
-    if (!req.file) return res.status(400).json({ error: 'Adjunta un archivo CSV o Excel (.xlsx) en el campo "file".' });
-    const { source, lawful_basis: lawfulBasis } = z.object({
-      source: z.string().trim().min(2, 'Indica el origen de los datos (fuente autorizada).').max(120),
-      lawful_basis: z.enum(Object.keys(LAWFUL_BASES), { message: 'Indica la base legal para contactar a estos leads.' }),
-    }).parse(req.body);
-
+  /** Parses, deduplicates, validates and stores a CSV/Excel file of leads in a campaign. */
+  async function importFile(userId, c, file, { source, lawfulBasis }) {
     let parsed;
     try {
-      parsed = await parseProspectsFile(req.file.buffer, { filename: req.file.originalname, mimetype: req.file.mimetype });
+      parsed = await parseProspectsFile(file.buffer, { filename: file.originalname, mimetype: file.mimetype });
     } catch (err) {
-      return res.status(400).json({ error: err.message });
+      throw Object.assign(new Error(err.message), { status: 400 });
     }
 
     // Duplicates inside the file are dropped before validation.
@@ -437,13 +432,13 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
     const nextSend = c.status === 'active' ? nowIso(now()) : null;
     db.transaction(() => {
       unique.forEach((p, i) => {
-        if (suppressed.get(req.user.id, p.email)) {
+        if (suppressed.get(userId, p.email)) {
           result.suppressed += 1;
           return;
         }
         const v = validations[i];
         const notes = [...v.notes];
-        if (elsewhere.get(req.user.id, p.email, c.id)) {
+        if (elsewhere.get(userId, p.email, c.id)) {
           notes.push('ya está en otra campaña');
           result.contacted_elsewhere += 1;
         }
@@ -460,7 +455,7 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
           stop_reason: invalid ? `Validación: ${notes.join('; ')}` : null,
           next_send_at: invalid ? null : nextSend,
           unsubscribe_token: randomToken(),
-          company_id: upsertCompany(db, req.user.id, p),
+          company_id: upsertCompany(db, userId, p),
           // Every lead starts in research until the commercial analysis classifies it.
           lead_status: invalid ? 'excluded' : 'research',
           lead_status_reasons: invalid ? notes.join('; ') : 'pendiente de análisis',
@@ -480,7 +475,135 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
       });
     })();
     if (c.status === 'completed' && result.imported) db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(c.id);
-    res.json(result);
+    return result;
+  }
+
+  router.post('/:id/prospects/import', upload.single('file'), async (req, res) => {
+    const c = own(req);
+    if (!c) return res.status(404).json({ error: 'Campaña no encontrada' });
+    if (!req.file) return res.status(400).json({ error: 'Adjunta un archivo CSV o Excel (.xlsx) en el campo "file".' });
+    const { source, lawful_basis: lawfulBasis } = z.object({
+      source: z.string().trim().min(2, 'Indica el origen de los datos (fuente autorizada).').max(120),
+      lawful_basis: z.enum(Object.keys(LAWFUL_BASES), { message: 'Indica la base legal para contactar a estos leads.' }),
+    }).parse(req.body);
+    res.json(await importFile(req.user.id, c, req.file, { source, lawfulBasis }));
+  });
+
+  // -------------------------------------------------------------------------
+  // Light flow: 1) base + brand → 2) automatic analysis and messages per group →
+  // 3) the user approves groups → 4) schedule. Everything else uses the defaults.
+  // -------------------------------------------------------------------------
+  router.post('/quick', upload.single('file'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Adjunta tu base en CSV o Excel (.xlsx).' });
+    const input = z.object({
+      brand_id: z.coerce.number({ message: 'Elige la marca de la campaña.' }).int(),
+      name: z.string().trim().max(120).optional(),
+      timezone: z.string().optional(),
+      source: z.string().trim().max(120).optional(),
+      lawful_basis: z.enum(Object.keys(LAWFUL_BASES)).default('interes_legitimo'),
+    }).parse(req.body);
+    const brand = db.prepare('SELECT * FROM brands WHERE id = ? AND user_id = ?').get(input.brand_id, req.user.id);
+    if (!brand) return res.status(404).json({ error: 'Marca no encontrada' });
+    const senders = db.prepare("SELECT id FROM senders WHERE user_id = ? AND status = 'active' ORDER BY id").all(req.user.id).map((r) => r.id);
+    const date = now().toLocaleDateString('es', { day: 'numeric', month: 'short' });
+    const id = saveCampaign(req.user.id, null, campaignSchema.parse({
+      ...QUICK_SETTINGS,
+      name: input.name || `${brand.name} · ${date}`,
+      offer: brand.value_proposition,
+      timezone: input.timezone && isValidTimeZone(input.timezone) ? input.timezone : 'America/Panama',
+      brand_id: brand.id,
+      sender_ids: senders,
+      schedule: QUICK_SCHEDULE,
+      steps: QUICK_SEQUENCE,
+      hooks: QUICK_HOOKS,
+      problems: QUICK_PROBLEMS,
+      ctas: QUICK_CTAS,
+    }));
+    const c = own(req, id);
+    let result;
+    try {
+      result = await importFile(req.user.id, c, req.file, { source: input.source || `Base ${req.file.originalname}`.slice(0, 120), lawfulBasis: input.lawful_basis });
+    } catch (err) {
+      db.prepare('DELETE FROM campaigns WHERE id = ?').run(id);
+      throw err;
+    }
+    if (!result.imported) {
+      db.prepare('DELETE FROM campaigns WHERE id = ?').run(id);
+      return res.status(400).json({ error: 'No se pudo importar ningún lead: revisa que el archivo tenga una columna de email.', import: result });
+    }
+    res.status(201).json({ campaign_id: id, import: result, senders: senders.length });
+  });
+
+  /** One batch of preparation: analyze up to 30 leads, then write the messages of one group. */
+  router.post('/:id/prepare', async (req, res) => {
+    const c = own(req);
+    if (!c) return res.status(404).json({ error: 'Campaña no encontrada' });
+    const batch = db.prepare("SELECT * FROM prospects WHERE campaign_id = ? AND intel_at IS NULL AND status = 'active' ORDER BY id LIMIT 30").all(c.id);
+    for (const p of batch) await analyzeAndClassify(db, p, c, { analyzeFn, now });
+    const count = (sql) => db.prepare(sql).get(c.id).n;
+    const pending = count("SELECT COUNT(*) AS n FROM prospects WHERE campaign_id = ? AND intel_at IS NULL AND status = 'active'");
+    let notice = null;
+    if (!pending) {
+      const group = db.prepare(
+        `SELECT g.* FROM message_groups g WHERE g.campaign_id = ? AND g.status = 'new'
+           AND EXISTS (SELECT 1 FROM prospects p WHERE p.group_id = g.id AND p.lead_status = 'ready' AND p.status = 'active')
+           AND NOT EXISTS (SELECT 1 FROM variants v WHERE v.group_id = g.id) ORDER BY g.id LIMIT 1`,
+      ).get(c.id);
+      if (group) {
+        try {
+          await generateGroupMessages(db, { campaign: c, group, generateFn });
+        } catch (err) {
+          // The AI failed for this group: start from the templates so the flow never blocks.
+          await generateGroupMessages(db, { campaign: c, group, generateFn, forceTemplate: true });
+          notice = `La IA no respondió para "${group.label}" (${String(err.message).slice(0, 120)}); se usaron las plantillas base.`;
+        }
+      }
+    }
+    const groupsLeft = count(
+      `SELECT COUNT(*) AS n FROM message_groups g WHERE g.campaign_id = ? AND g.status = 'new'
+         AND EXISTS (SELECT 1 FROM prospects p WHERE p.group_id = g.id AND p.lead_status = 'ready' AND p.status = 'active')
+         AND NOT EXISTS (SELECT 1 FROM variants v WHERE v.group_id = g.id)`,
+    );
+    res.json({
+      total: count('SELECT COUNT(*) AS n FROM prospects WHERE campaign_id = ?'),
+      analyzed: count('SELECT COUNT(*) AS n FROM prospects WHERE campaign_id = ? AND intel_at IS NOT NULL'),
+      pending,
+      ready: count("SELECT COUNT(*) AS n FROM prospects WHERE campaign_id = ? AND lead_status = 'ready' AND status = 'active'"),
+      research: count("SELECT COUNT(*) AS n FROM prospects WHERE campaign_id = ? AND lead_status = 'research'"),
+      excluded: count("SELECT COUNT(*) AS n FROM prospects WHERE campaign_id = ? AND lead_status = 'excluded'"),
+      groups: count("SELECT COUNT(*) AS n FROM message_groups g WHERE g.campaign_id = ? AND EXISTS (SELECT 1 FROM prospects p WHERE p.group_id = g.id AND p.lead_status = 'ready')"),
+      groups_left: groupsLeft,
+      done: !pending && !groupsLeft,
+      notice,
+    });
+  });
+
+  /** Schedules the campaign: approved groups start sending at `start_at` (or now). */
+  router.post('/:id/schedule', (req, res) => {
+    const c = own(req);
+    if (!c) return res.status(404).json({ error: 'Campaña no encontrada' });
+    const input = z.object({
+      start_at: z.string().optional(),
+      max_per_day: z.number().int().min(1).max(2000).optional(),
+    }).parse(req.body);
+    const approved = db.prepare("SELECT COUNT(*) AS n FROM message_groups WHERE campaign_id = ? AND status = 'approved'").get(c.id).n;
+    if (!approved) return res.status(400).json({ error: 'Aprueba los mensajes de al menos un grupo antes de programar.' });
+    const { problems } = readiness(c);
+    if (problems.length) return res.status(400).json({ error: problems.join(' ') });
+    const at = now();
+    let start = input.start_at ? new Date(input.start_at) : at;
+    if (Number.isNaN(start.getTime())) return res.status(400).json({ error: 'Fecha de inicio inválida' });
+    if (start < at) start = at;
+    db.transaction(() => {
+      if (input.max_per_day) db.prepare('UPDATE campaigns SET max_per_day = ? WHERE id = ?').run(input.max_per_day, c.id);
+      db.prepare("UPDATE prospects SET next_send_at = ? WHERE campaign_id = ? AND status = 'active' AND current_step = 0").run(nowIso(start), c.id);
+      db.prepare("UPDATE campaigns SET status = 'active' WHERE id = ?").run(c.id);
+    })();
+    const reach = db.prepare(
+      `SELECT COUNT(*) AS contacts, COUNT(DISTINCT p.company_id) AS companies FROM prospects p JOIN message_groups g ON g.id = p.group_id
+       WHERE p.campaign_id = ? AND g.status = 'approved' AND p.lead_status = 'ready' AND p.status = 'active'`,
+    ).get(c.id);
+    res.json({ campaign: fullCampaign(own(req)), start_at: nowIso(start), approved_groups: approved, ...reach });
   });
 
   router.get('/:id/prospects', (req, res) => {

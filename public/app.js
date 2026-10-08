@@ -81,6 +81,7 @@ const routes = [
   [/^#\/login$/, viewLogin],
   [/^#\/register$/, viewRegister],
   [/^#\/campaigns$/, viewCampaigns],
+  [/^#\/new(?:\/(\d+)(?:\/(\w+))?)?$/, viewNew],
   [/^#\/campaigns\/(\d+)(?:\/(\w+))?$/, viewCampaign],
   [/^#\/senders/, viewSenders],
   [/^#\/tasks$/, viewTasks],
@@ -197,7 +198,7 @@ async function viewCampaigns() {
   const { campaigns } = await api('/campaigns');
   app.innerHTML = `
     <div class="row between"><div><h1>Campañas</h1><p class="muted">Importación → validación → inteligencia comercial → generación y aprobación → orquestación → resultados.</p></div>
-      <button class="btn" id="new-campaign">+ Nueva campaña</button></div>
+      <div class="row"><a class="small" href="#" id="new-campaign">Modo avanzado</a><a class="btn" href="#/new">+ Nueva campaña</a></div></div>
     ${campaigns.length ? `<div class="card table-wrap"><table>
       <thead><tr><th>Campaña</th><th>Estado</th><th>Prospectos</th><th>Por aprobar</th><th>Tareas</th><th>Respuesta</th><th>Reuniones</th><th>Cierres</th></tr></thead>
       <tbody>${campaigns.map((c) => `
@@ -205,9 +206,10 @@ async function viewCampaigns() {
         <td>${c.stats.prospects} <span class="muted small">(${c.stats.active} activos)</span></td>
         <td>${c.stats.pending_approval ? `<span class="badge warn">${c.stats.pending_approval}</span>` : '0'}</td><td>${c.stats.open_tasks}</td>
         <td>${c.stats.reply_rate}%</td><td>${c.stats.meetings}</td><td>${c.stats.won}</td></tr>`).join('')}
-      </tbody></table></div>` : '<div class="card empty"><p>Aún no tienes campañas.</p><p>1) Conecta un sender de Google Workspace · 2) Crea la campaña · 3) Importa tu base · 4) Revisa y aprueba · 5) Activa.</p></div>'}`;
+      </tbody></table></div>` : '<div class="card empty"><p>Aún no tienes campañas.</p><p>Carga tu base, elige la marca, aprueba los mensajes de cada grupo y programa. <a href="#/new">Crear mi primera campaña →</a></p></div>'}`;
   $$('tr[data-id]').forEach((tr) => tr.addEventListener('click', () => { location.hash = `#/campaigns/${tr.dataset.id}`; }));
   $('#new-campaign').addEventListener('click', (e) => guard(e.currentTarget, async () => {
+    e.preventDefault();
     const { campaign } = await api('/campaigns', { method: 'POST', body: defaultCampaign() });
     location.hash = `#/campaigns/${campaign.id}`;
   }));
@@ -937,6 +939,230 @@ async function renderResults(el, campaign) {
         ${s.replies.map((r) => `<tr><td>${esc(REPLY_LABEL[r.category] || r.category)}</td><td>${r.n}</td></tr>`).join('') || '<tr><td class="muted">Sin respuestas aún</td></tr>'}
         ${s.validation.map((r) => `<tr><td>Leads ${esc({ valid: 'válidos', risky: 'riesgosos', invalid: 'inválidos' }[r.status] || r.status)}</td><td>${r.n}</td></tr>`).join('')}</tbody></table>
         <p class="muted small">Decisiones: ${s.engines.map((e) => `${esc(engineLabel(e.engine))} (${e.n})`).join(', ') || '—'}</p></div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Light campaign flow: 1) base + brand → 2) analysis → 3) approve messages → 4) schedule
+// ---------------------------------------------------------------------------
+const WIZARD_STEPS = [['', 'Base y marca'], ['prepare', 'Análisis'], ['review', 'Mensajes'], ['schedule', 'Programar']];
+
+function wizardHeader(current) {
+  const idx = current === 'done' ? WIZARD_STEPS.length : WIZARD_STEPS.findIndex(([k]) => k === current);
+  return `<a href="#/campaigns" class="small">← Campañas</a><h1>Nueva campaña</h1>
+    <ol class="stepper">${WIZARD_STEPS.map(([, l], i) => `<li class="${i < idx ? 'done' : i === idx ? 'current' : ''}"><span>${i < idx ? '✓' : i + 1}</span>${l}</li>`).join('')}</ol>`;
+}
+
+async function viewNew(id, step) {
+  if (!id) return wizardStart();
+  if (step === 'prepare') return wizardPrepare(Number(id));
+  if (step === 'schedule') return wizardSchedule(Number(id));
+  if (step === 'done') return wizardDone(Number(id));
+  return wizardReview(Number(id));
+}
+
+async function wizardStart() {
+  const [{ brands }, { senders }] = await Promise.all([api('/brands'), api('/senders')]);
+  const active = senders.filter((s) => s.status === 'active');
+  app.innerHTML = `${wizardHeader('')}
+    ${!brands.length ? '<div class="notice">Primero crea tu marca (qué vendes, a quién y sus perfiles de comprador): <a href="#/brands?id=new">Crear marca</a>.</div>' : ''}
+    ${!active.length ? '<div class="notice">Aún no hay un correo conectado para enviar. Puedes preparar la campaña y conectarlo antes de programarla en <a href="#/senders">Senders</a>.</div>' : ''}
+    <form id="w-form" class="card stack wizard-card">
+      <div><label>1. Tu base de contactos</label>
+        <label class="dropzone" for="w-file"><input type="file" id="w-file" name="file" accept=".csv,.xlsx,.xls,text/csv" required>
+          <b id="w-file-name">Elige o arrastra tu archivo CSV o Excel</b><span class="small muted">Columnas útiles: email, nombre, empresa, cargo, industria. El resto se usa para personalizar.</span></label></div>
+      <div><label for="w-brand">2. ¿Qué marca vas a vender?</label>
+        <select id="w-brand" name="brand_id" required>${brands.map((b) => `<option value="${b.id}">${esc(b.name)}${b.personas?.length ? ` · ${b.personas.length} perfiles` : ''}</option>`).join('')}</select></div>
+      <details class="small"><summary>Opcional: nombre y origen de los datos</summary>
+        <div class="grid2" style="margin-top:8px">
+          <div><label>Nombre de la campaña</label><input type="text" name="name" placeholder="Se genera solo: marca · fecha"></div>
+          <div><label>Base legal para contactar</label><select name="lawful_basis">${Object.entries(meta.lawful_bases || {}).map(([k, l]) => `<option value="${k}" ${k === 'interes_legitimo' ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+        </div>
+        <div style="margin-top:8px"><label>Origen de los datos</label><input type="text" name="source" placeholder="Se usa el nombre del archivo"></div>
+      </details>
+      <p class="small muted">Todo lo demás lo prepara la plataforma con estándares de 2026: agrupa tus contactos, escribe los mensajes de cada grupo y deja listas las reglas de envío. Tú solo apruebas.</p>
+      <div class="row"><button class="btn" type="submit" ${brands.length ? '' : 'disabled'}>Continuar →</button></div>
+    </form>`;
+  $('#w-file').addEventListener('change', (e) => { $('#w-file-name').textContent = e.target.files[0]?.name || 'Elige o arrastra tu archivo CSV o Excel'; });
+  $('#w-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    guard(e.submitter, async () => {
+      const form = new FormData(e.target);
+      form.append('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Panama');
+      for (const [k, v] of [...form.entries()]) if (v === '') form.delete(k);
+      e.submitter.textContent = 'Importando…';
+      const r = await api('/campaigns/quick', { method: 'POST', form });
+      sessionStorage.setItem(`import_${r.campaign_id}`, JSON.stringify(r.import));
+      location.hash = `#/new/${r.campaign_id}/prepare`;
+    });
+  });
+}
+
+async function wizardPrepare(id) {
+  let imported = null;
+  try { imported = JSON.parse(sessionStorage.getItem(`import_${id}`) || 'null'); } catch { /* ignore */ }
+  app.innerHTML = `${wizardHeader('prepare')}
+    <div class="card wizard-card">
+      ${imported ? `<p><b>${imported.imported}</b> contactos importados${imported.invalid ? ` · ${imported.invalid} inválidos` : ''}${imported.duplicates ? ` · ${imported.duplicates} duplicados` : ''}${imported.suppressed ? ` · ${imported.suppressed} en lista de baja` : ''}.</p>` : ''}
+      <h2 id="p-title">Analizando tu base…</h2>
+      <p class="muted small" id="p-detail">Respondemos las 5 preguntas por contacto, asignamos su perfil y lo agrupamos.</p>
+      <div class="progress"><div id="p-bar" style="width:2%"></div></div>
+      <ul class="small" id="p-notes"></ul>
+    </div>`;
+  const notes = [];
+  for (let i = 0; i < 500; i += 1) {
+    if (!location.hash.startsWith(`#/new/${id}/prepare`)) return;
+    // eslint-disable-next-line no-await-in-loop
+    const s = await api(`/campaigns/${id}/prepare`, { method: 'POST' });
+    if (s.notice) notes.push(s.notice);
+    const analysisPart = s.total ? s.analyzed / s.total : 1;
+    const writingPart = s.groups ? (s.groups - s.groups_left) / s.groups : 1;
+    $('#p-bar').style.width = `${Math.max(2, Math.round((s.pending ? analysisPart * 0.6 : 0.6 + writingPart * 0.4) * 100))}%`;
+    if (s.pending) {
+      $('#p-title').textContent = `Analizando tu base… ${s.analyzed} de ${s.total}`;
+    } else {
+      $('#p-title').textContent = `Escribiendo los mensajes de cada grupo… ${s.groups - s.groups_left} de ${s.groups}`;
+      $('#p-detail').textContent = `${s.ready} contactos aptos en ${s.groups} grupos · ${s.research} requieren investigación · ${s.excluded} excluidos.`;
+    }
+    $('#p-notes').innerHTML = notes.map((n) => `<li>${esc(n)}</li>`).join('');
+    if (s.done) {
+      location.hash = `#/new/${id}/review`;
+      return;
+    }
+  }
+}
+
+async function wizardReview(id) {
+  const [{ campaign }, data] = await Promise.all([api(`/campaigns/${id}`), api(`/campaigns/${id}/groups`)]);
+  const groups = data.groups.filter((g) => g.ready > 0 || g.status === 'approved');
+  const research = data.groups.reduce((a, g) => a + g.research, 0);
+  const approved = groups.filter((g) => g.status === 'approved');
+  const contacts = approved.reduce((a, g) => a + g.ready, 0);
+  const stepName = (m) => (m.step_number === 1 ? 'Primer correo' : `Seguimiento ${m.step_number - 1} · día +${m.delay_days}`);
+  app.innerHTML = `${wizardHeader('review')}
+    <div class="card row between wizard-bar">
+      <div><b>${groups.length} grupo(s)</b> para ${esc(campaign.brand?.name || '')}. Revisa cómo lo leerá cada persona y decide.
+        ${research ? `<br><span class="small muted">${research} contacto(s) no se enviarán por ahora: les falta cargo, industria o un dato verificable (los ves en Prospectos).</span>` : ''}</div>
+      <div class="row"><button class="btn ghost" id="r-all">✓ Aprobar todos</button>
+        <a class="btn ${approved.length ? '' : 'disabled-link'}" href="#/new/${id}/schedule" id="r-next">Programar (${contacts} contactos) →</a></div>
+    </div>
+    ${groups.map((g) => {
+      const msgs = g.messages.filter((m) => m.variants.length);
+      const state = g.status === 'approved' ? ['Aprobado', 'ok'] : g.status === 'paused' ? ['No se enviará', 'bad'] : ['Por decidir', 'warn'];
+      return `<div class="card wgroup ${g.status}" data-g="${g.id}">
+        <div class="row between"><div><h2 style="margin:0">${esc(g.label)}</h2><span class="small muted">${g.ready} contacto(s) · ${g.companies} empresa(s)</span></div>
+          <span class="badge ${state[1]}">${state[0]}</span></div>
+        ${msgs.map((m, i) => {
+          const v = m.variants.find((x) => x.status === 'proposed') || m.variants[0];
+          const errors = v.issues.filter((x) => x.severity === 'error');
+          return `<details class="wmsg" ${i === 0 ? 'open' : ''}><summary><b>${stepName(m)}</b>${v.preview?.subject && m.step_number === 1 ? ` — “${esc(v.preview.subject)}”` : ''}${errors.length ? ' <span class="badge bad">revisar</span>' : ''}</summary>
+            ${v.preview ? `<div class="preview-mail">${esc(v.preview.body)}</div><p class="small muted">Ejemplo para ${esc(v.preview.to)}${v.preview.company ? ` (${esc(v.preview.company)})` : ''}. Cada persona recibe sus propios datos.</p>` : ''}
+            ${errors.length ? `<ul class="lint">${errors.map((x) => `<li class="sev-error">⛔ ${esc(x.message)}</li>`).join('')}</ul>` : ''}
+            <div class="wedit" hidden data-vid="${v.id}">
+              ${m.step_number === 1 || !m.same_thread ? `<label class="small">Asunto</label><input type="text" data-f="subject" value="${esc(v.subject)}">` : ''}
+              <label class="small">Mensaje <span class="hint">({{first_name}}, {{company}}… se reemplazan por los datos de cada persona)</span></label><textarea data-f="body" rows="6" style="font-family:inherit;font-size:14px">${esc(v.body)}</textarea>
+            </div></details>`;
+        }).join('') || '<p class="muted">Sin mensajes todavía.</p>'}
+        <div class="row" style="margin-top:10px">
+          ${g.status !== 'approved' ? '<button class="btn ok small" data-w="approve">✓ Aprobar</button>' : ''}
+          ${g.status !== 'paused' ? '<button class="btn ghost small" data-w="pause">✗ No enviar</button>' : '<button class="btn ghost small" data-w="resume">Reconsiderar</button>'}
+          <button class="btn ghost small" data-w="generate">↻ Otra versión</button>
+          <button class="btn ghost small" data-w="edit">✎ Editar</button>
+        </div>
+      </div>`;
+    }).join('') || '<div class="card empty">No quedaron contactos aptos. Revisa la base en Prospectos (cargo, industria y email).</div>'}`;
+
+  const reload = () => wizardReview(id);
+  $('#r-next').addEventListener('click', (e) => { if (!approved.length) { e.preventDefault(); toast('Aprueba al menos un grupo'); } });
+  $('#r-all').addEventListener('click', (e) => guard(e.currentTarget, async () => {
+    const failed = [];
+    for (const g of groups.filter((x) => x.status !== 'approved' && x.status !== 'paused')) {
+      // eslint-disable-next-line no-await-in-loop
+      await api(`/groups/${g.id}/approve`, { method: 'POST' }).catch((err) => failed.push(`${g.label}: ${err.message}`));
+    }
+    if (failed.length) toast(`No se aprobaron ${failed.length}: ${failed[0]}`, 'error');
+    else toast('Todos los grupos aprobados');
+    reload();
+  }));
+  $$('[data-g]').forEach((card) => {
+    const gid = card.dataset.g;
+    $$('[data-w]', card).forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+      const act = b.dataset.w;
+      if (act === 'edit') {
+        const editing = b.dataset.on === '1';
+        if (editing) {
+          await api(`/groups/${gid}`, { method: 'PUT', body: { messages: $$('.wedit', card).map((w) => ({ id: Number(w.dataset.vid), subject: $('[data-f="subject"]', w)?.value || '', body: $('[data-f="body"]', w).value })) } });
+          toast('Cambios guardados');
+          return reload();
+        }
+        $$('.wmsg', card).forEach((d) => { d.open = true; });
+        $$('.wedit', card).forEach((w) => { w.hidden = false; });
+        b.dataset.on = '1';
+        b.textContent = '💾 Guardar cambios';
+        return undefined;
+      }
+      if (act === 'generate') b.textContent = 'Escribiendo…';
+      if (act === 'approve' && $$('.wedit', card).some((w) => !w.hidden)) {
+        await api(`/groups/${gid}`, { method: 'PUT', body: { messages: $$('.wedit', card).map((w) => ({ id: Number(w.dataset.vid), subject: $('[data-f="subject"]', w)?.value || '', body: $('[data-f="body"]', w).value })) } });
+      }
+      await api(`/groups/${gid}/${act}`, { method: 'POST' });
+      return reload();
+    })));
+  });
+}
+
+function nextMorning() {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  while ([0, 6].includes(d.getDay())) d.setDate(d.getDate() + 1);
+  d.setHours(8, 0, 0, 0);
+  return d;
+}
+const toLocalInput = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+
+async function wizardSchedule(id) {
+  const [{ campaign, readiness }, data] = await Promise.all([api(`/campaigns/${id}`), api(`/campaigns/${id}/groups`)]);
+  const approved = data.groups.filter((g) => g.status === 'approved');
+  const contacts = approved.reduce((a, g) => a + g.ready, 0);
+  const days = Object.entries(campaign.schedule).filter(([, d]) => d.on);
+  const tomorrow = nextMorning();
+  app.innerHTML = `${wizardHeader('schedule')}
+    <div class="card wizard-card stack">
+      <h2>¿Cuándo empezamos?</h2>
+      <p><b>${contacts} contacto(s)</b> de ${approved.length} grupo(s) aprobado(s) recibirán el primer correo; los seguimientos salen solos si no responden.</p>
+      <label class="check"><input type="radio" name="when" value="now" checked> Lo antes posible (dentro del horario de envío)</label>
+      <label class="check"><input type="radio" name="when" value="tomorrow"> ${esc(tomorrow.toLocaleString('es', { weekday: 'long', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</label>
+      <label class="check"><input type="radio" name="when" value="custom"> Elegir fecha y hora <input type="datetime-local" id="s-at" value="${toLocalInput(tomorrow)}" style="width:auto"></label>
+      <div class="notice info small">
+        <b>Reglas que se aplicarán</b> (puedes cambiarlas después en la campaña → Reglas de envío):
+        <ul>
+          <li>${days.map(([d, v]) => `${DAYS.find(([n]) => String(n) === d)?.[1]} ${v.start}–${v.end}`).join(' · ')} (${esc(campaign.timezone)})</li>
+          <li>Hasta <input type="number" id="s-max" min="1" max="2000" value="${campaign.max_per_day}" style="width:80px"> correos por día, con ${campaign.delay_minutes} min entre correos</li>
+          <li>Máximo ${campaign.max_contacts_per_company} personas por empresa, separadas ${campaign.company_gap_days} día(s); si alguien de la empresa responde, se detiene toda la cuenta</li>
+          <li>Texto simple, sin pixel de aperturas, con baja de un clic</li>
+        </ul>
+      </div>
+      ${readiness.problems.length ? `<div class="notice"><ul>${readiness.problems.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></div>` : ''}
+      <div class="row"><a class="btn ghost" href="#/new/${id}/review">← Volver a los mensajes</a><button class="btn ok" id="s-go">Programar campaña</button></div>
+    </div>`;
+  $('#s-go').addEventListener('click', (e) => guard(e.currentTarget, async () => {
+    const when = $('input[name=when]:checked').value;
+    const start = when === 'now' ? null : when === 'tomorrow' ? tomorrow : new Date($('#s-at').value);
+    const r = await api(`/campaigns/${id}/schedule`, { method: 'POST', body: { start_at: start ? start.toISOString() : undefined, max_per_day: Number($('#s-max').value) } });
+    sessionStorage.setItem(`scheduled_${id}`, JSON.stringify(r));
+    location.hash = `#/new/${id}/done`;
+  }));
+}
+
+async function wizardDone(id) {
+  let r = null;
+  try { r = JSON.parse(sessionStorage.getItem(`scheduled_${id}`) || 'null'); } catch { /* ignore */ }
+  app.innerHTML = `${wizardHeader('done')}
+    <div class="card wizard-card stack">
+      <h2>✓ Campaña programada</h2>
+      ${r ? `<p><b>${r.contacts}</b> contacto(s) en <b>${r.companies}</b> empresa(s). Primer envío desde ${esc(fmtDate(r.start_at))}.</p>` : ''}
+      <p>Desde ahora la plataforma envía y hace los seguimientos sola. Te pedirá permiso en <b>Tareas</b> para contestar respuestas y cambiar mensajes que no funcionen.</p>
+      <div class="row"><a class="btn" href="#/tasks">Ir a Tareas</a><a class="btn ghost" href="#/campaigns/${id}">Ver la campaña</a></div>
     </div>`;
 }
 
