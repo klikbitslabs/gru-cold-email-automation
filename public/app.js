@@ -123,6 +123,18 @@ async function router() {
   location.hash = '#/campaigns';
 }
 window.addEventListener('hashchange', router);
+function syncThemeButton() {
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  $('#theme-toggle').textContent = dark ? '☀️' : '🌙';
+  $('#theme-toggle').title = dark ? 'Cambiar a tema claro' : 'Cambiar a tema oscuro';
+}
+$('#theme-toggle').addEventListener('click', () => {
+  const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  try { localStorage.setItem('gru_theme', next); } catch { /* ignore */ }
+  syncThemeButton();
+});
+syncThemeButton();
 $('#logout').addEventListener('click', () => { token.clear(); currentUser = null; location.hash = '#/login'; });
 
 // ---------------------------------------------------------------------------
