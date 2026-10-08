@@ -13,6 +13,8 @@ export const SETTINGS = {
   allow_consumer_gmail: { env: 'ALLOW_CONSUMER_GMAIL', secret: false, label: 'Permitir cuentas @gmail.com', bool: true, default: 'false' },
   typesafe_api_key: { env: 'TYPESAFE_API_KEY', secret: true, label: 'TypeSafe API key (Jev)' },
   typesafe_model: { env: 'TYPESAFE_MODEL', secret: false, label: 'Modelo de Jev', default: 'jev-latest' },
+  openai_api_key: { env: 'OPENAI_API_KEY', secret: true, label: 'OpenAI API key (redacción)' },
+  openai_model: { env: 'OPENAI_MODEL', secret: false, label: 'Modelo de OpenAI', default: 'gpt-4.1-mini' },
 };
 
 let db = null;
@@ -75,8 +77,14 @@ export const integrations = {
     model: getSetting('typesafe_model') || 'jev-latest',
     baseURL: process.env.TYPESAFE_BASE_URL || undefined,
   }),
+  openai: () => ({
+    apiKey: getSetting('openai_api_key'),
+    model: getSetting('openai_model') || 'gpt-4.1-mini',
+    baseURL: (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, ''),
+  }),
 };
 
+export const openaiConfigured = () => Boolean(getSetting('openai_api_key'));
 export const googleConfigured = () => Boolean(getSetting('google_client_id') && getSetting('google_client_secret'));
 export const jevConfigured = () => Boolean(getSetting('typesafe_api_key'));
 

@@ -105,36 +105,87 @@ const tokenize = (text) =>
       .filter((w) => w.length > 3),
   );
 
-/** Rule fallback: segment with the most keyword overlap with the prospect's role/industry. */
-export function ruleAnalysis({ prospect, segments }) {
-  const profile = tokenize(Object.values(prospectFacts(prospect)).join(' '));
+/** Splits a brand field ("Retail, distribución\nFarmacias") into clean options. */
+export const listOf = (text) =>
+  String(text || '')
+    .split(/[,;\n]+/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .slice(0, 12);
+
+const overlap = (a, b) => [...tokenize(a)].filter((w) => tokenize(b).has(w)).length;
+
+/**
+ * Rule fallback for the analysis: keyword overlap for segment, company fit (brand industries)
+ * and role fit (brand functions). Unknown when there is not enough data — never "no" by guess.
+ */
+export function ruleAnalysis({ prospect, segments, brand }) {
+  const facts = prospectFacts(prospect);
+  const profile = Object.values(facts).join(' ');
   let best = null;
   let bestScore = 0;
   for (const seg of segments) {
-    const overlap = [...tokenize(`${seg.name} ${seg.description}`)].filter((w) => profile.has(w)).length;
-    if (overlap > bestScore) {
+    const n = overlap(`${seg.name} ${seg.description}`, profile);
+    if (n > bestScore) {
       best = seg;
-      bestScore = overlap;
+      bestScore = n;
     }
   }
+  const industries = listOf(brand?.industries);
+  const functions = listOf(brand?.functions);
+  const problems = listOf(brand?.problems);
+  const companyText = [prospect.industry, prospect.company, facts.sector, facts.industria].filter(Boolean).join(' ');
+  const industryMatch = industries.find((i) => overlap(i, companyText));
+  const roleMatch = functions.find((f) => overlap(f, prospect.title || ''));
+  const problem = problems.find((pr) => overlap(pr, `${prospect.title} ${prospect.industry}`)) || problems[0] || null;
   return {
     engine: 'rules',
     segmentId: best?.id ?? null,
     fitScore: null,
     exclude: false,
-    detail: { segment: best ? `coincidencia de palabras clave (${bestScore})` : 'sin coincidencias' },
+    companyFit: !industries.length ? 'unknown' : industryMatch ? 'yes' : (prospect.industry ? 'unclear' : 'unknown'),
+    roleFit: !functions.length ? 'unknown' : roleMatch ? 'yes' : (prospect.title ? 'unclear' : 'unknown'),
+    inferredIndustry: industryMatch || null,
+    problem,
+    detail: {
+      segment: best ? `coincidencia de palabras clave (${bestScore})` : 'sin coincidencias',
+      company_fit: industryMatch ? `industria coincide con "${industryMatch}"` : 'sin coincidencia con las industrias de la marca',
+      role_fit: roleMatch ? `cargo coincide con "${roleMatch}"` : 'sin coincidencia con las funciones de la marca',
+    },
   };
 }
 
-/** @param ctx { campaign, prospect, segments } */
+/**
+ * Stage 1 — answers the judgment questions before acting:
+ *   1. ¿La empresa encaja con la marca?   2. ¿La persona tiene responsabilidades relacionadas?
+ *   3. ¿Qué problema podría importarle?   (+ segment, ICP fit, exclusion)
+ * Questions 4 (información suficiente) and 5 (siguiente acción) are answered by code.
+ * @param ctx { campaign, prospect, segments, brand }
+ */
 export async function analyzeProspect(ctx, { client = defaultClient() } = {}) {
   const fallback = ruleAnalysis(ctx);
   if (!ctx.campaign.jev_enabled || !client) return fallback;
-  const { campaign, prospect, segments } = ctx;
+  const { campaign, prospect, segments, brand } = ctx;
+  const industries = listOf(brand?.industries);
+  const functions = listOf(brand?.functions);
+  const problems = listOf(brand?.problems);
+  const offer = campaign.offer || brand?.value_proposition || '';
   const questions = {
     exclude: noul(
-      'Should this prospect be excluded from outreach? Answer yes only when the facts in `prospect` clearly show they cannot benefit from `campaign.offer`: an unrelated industry or role, a direct competitor, a student or job seeker, or a generic inbox unlikely to be read by a decision maker. Missing data is not a reason to exclude.',
+      'Should this prospect be excluded from outreach? Answer yes only when the facts in `prospect` clearly show they cannot benefit from `brand`: an unrelated industry or role, a direct competitor, a student or job seeker, or a generic inbox unlikely to be read by a decision maker. Missing data is not a reason to exclude.',
     ),
+    company_fit: score('How well does the company in `prospect` fit the industries and operations `brand` sells to?', [
+      'Clearly a different industry or operation',
+      'Unclear: not enough information about the company',
+      'Related industry, partial fit',
+      'Fits one of the target industries and operations',
+    ]),
+    role_fit: score('How related are the responsibilities of the person in `prospect` (their title) to what `brand` sells and the functions it targets?', [
+      'Unrelated responsibilities',
+      'Unclear: title missing or ambiguous',
+      'Adjacent: influences the decision but does not own it',
+      'Directly responsible for the area the brand serves',
+    ]),
   };
   if (segments.length) {
     questions.segment = choice('Which commercial segment in `segments` does this prospect belong to, based on their role, industry and company?', {
@@ -142,8 +193,20 @@ export async function analyzeProspect(ctx, { client = defaultClient() } = {}) {
       none: 'None of the segments describes this prospect',
     });
   }
+  if (problems.length) {
+    questions.problem = choice('Which of these problems is most likely to matter to this person, given their title and industry?', {
+      ...Object.fromEntries(problems.map((pr, i) => [`p${i}`, pr])),
+      none: 'None of them is likely to matter to this person',
+    });
+  }
+  if (industries.length && !prospect.industry) {
+    questions.industry = choice("Which of these industries best describes the prospect's company?", {
+      ...Object.fromEntries(industries.map((ind, i) => [`i${i}`, ind])),
+      other: 'Another industry, or cannot tell from the data',
+    });
+  }
   if (campaign.icp?.trim()) {
-    questions.fit = score('How well does `prospect` match `campaign.ideal_customer_profile` (role, industry, company type)?', [
+    questions.fit = score('How well does `prospect` match `ideal_customer_profile`?', [
       'Clearly outside the ideal customer profile',
       'Weak match: only one minor attribute matches',
       'Partial match: industry or role matches but not both',
@@ -151,10 +214,20 @@ export async function analyzeProspect(ctx, { client = defaultClient() } = {}) {
       'Ideal match: matches the profile on every stated attribute',
     ]);
   }
+  const level = (answer) => {
+    if (!answer) return 'unknown';
+    if (answer.confidence < 0.5) return 'unclear';
+    if (answer.score >= 2.5) return 'yes';
+    if (answer.score >= 1.5) return 'partial';
+    if (answer.score >= 0.5) return 'unknown';
+    return 'no';
+  };
   try {
     const result = await client.systemOne({
       state: {
-        campaign: { offer: truncate(campaign.offer, 1500), ideal_customer_profile: truncate(campaign.icp, 1500) },
+        brand: brand ? { name: brand.name, value_proposition: truncate(brand.value_proposition, 800), target_industries: industries, target_functions: functions, problems } : null,
+        offer: truncate(offer, 1200),
+        ideal_customer_profile: truncate(campaign.icp, 1200),
         segments: Object.fromEntries(segments.map((sg) => [`s${sg.id}`, { name: sg.name, description: sg.description }])),
         prospect: prospectFacts(prospect),
       },
@@ -162,15 +235,24 @@ export async function analyzeProspect(ctx, { client = defaultClient() } = {}) {
     });
     const a = result.answers;
     const seg = a.segment && a.segment.choice !== 'none' ? Number(a.segment.choice.slice(1)) : null;
+    const industryIdx = a.industry && a.industry.choice !== 'other' && a.industry.confidence >= 0.6 ? Number(a.industry.choice.slice(1)) : null;
     return {
       engine: 'jev',
       segmentId: seg,
       fitScore: a.fit ? Number((a.fit.score / 4).toFixed(3)) : null,
       exclude: (a.exclude?.noul ?? 0) >= STOP_THRESHOLD,
+      companyFit: industries.length ? level(a.company_fit) : 'unknown',
+      roleFit: functions.length ? level(a.role_fit) : 'unknown',
+      inferredIndustry: industryIdx !== null ? industries[industryIdx] : null,
+      problem: a.problem && a.problem.choice !== 'none' ? problems[Number(a.problem.choice.slice(1))] : null,
       detail: {
         model: result.model,
         exclude_probability: a.exclude?.noul ?? null,
-        segment: a.segment ? { choice: a.segment.choice, confidence: a.segment.confidence, probabilities: a.segment.probabilities } : null,
+        company_fit: a.company_fit ? { score: a.company_fit.score, confidence: a.company_fit.confidence } : null,
+        role_fit: a.role_fit ? { score: a.role_fit.score, confidence: a.role_fit.confidence } : null,
+        problem: summary(a.problem),
+        segment: summary(a.segment),
+        industry: summary(a.industry),
         fit: a.fit ? { score: a.fit.score, confidence: a.fit.confidence } : null,
       },
     };

@@ -4,7 +4,13 @@ import { z } from 'zod';
 import { nowIso } from '../db.js';
 import { checkDraft } from '../lib/quality.js';
 import { requireAuth } from '../middleware/auth.js';
-import { advanceProspect, loadSequence, setOutcome } from '../services/scheduler.js';
+import { abRecommendations } from '../lib/ab.js';
+import { nextAction } from '../lib/leads.js';
+import { LAWFUL_BASES } from '../lib/validate.js';
+import { analyzeProspect } from '../services/jev.js';
+import { generateVariants } from '../services/openai.js';
+import { advanceProspect, analyzeAndClassify, loadSequence, performanceStats, setOutcome } from '../services/scheduler.js';
+import { openaiConfigured } from '../services/settings.js';
 
 const OUTCOMES = ['interested', 'meeting', 'opportunity', 'won', 'lost'];
 const TASK_OUTCOMES = {
@@ -16,7 +22,7 @@ const TASK_OUTCOMES = {
   done: 'Hecho',
 };
 
-export function workRoutes(db, { now = () => new Date() } = {}) {
+export function workRoutes(db, { now = () => new Date(), analyzeFn = analyzeProspect, generateFn = generateVariants } = {}) {
   const router = Router();
   // Per-route auth: this router is mounted on /api next to public endpoints.
   const auth = requireAuth(db);
@@ -168,9 +174,13 @@ export function workRoutes(db, { now = () => new Date() } = {}) {
     const tasks = db.prepare('SELECT id, step_number, channel, status, outcome, note, created_at, completed_at FROM tasks WHERE prospect_id = ? ORDER BY id').all(p.id);
     const drafts = db.prepare("SELECT id, step_number, status, subject FROM drafts WHERE prospect_id = ? AND status IN ('pending','approved') ORDER BY id").all(p.id);
     const segment = p.segment_id ? db.prepare('SELECT name FROM segments WHERE id = ?').get(p.segment_id)?.name : null;
+    const company = p.company_id ? db.prepare('SELECT id, name, domain FROM companies WHERE id = ?').get(p.company_id) : null;
+    const intel = p.intel_json ? JSON.parse(p.intel_json) : null;
+    const questions = [...(intel?.questions || []), nextAction(db, p)];
     const { seen_message_ids_json: _seen, pending_decision_json: _pending, unsubscribe_token: _token, fields_json: fieldsJson, intel_json: intelJson, ...prospect } = p;
     res.json({
-      prospect: { ...prospect, segment, fields: JSON.parse(fieldsJson || '{}'), intel: intelJson ? JSON.parse(intelJson) : null },
+      prospect: { ...prospect, segment, company_info: company, fields: JSON.parse(fieldsJson || '{}'), intel },
+      questions,
       messages,
       opens,
       decisions,
@@ -179,14 +189,42 @@ export function workRoutes(db, { now = () => new Date() } = {}) {
     });
   });
 
-  router.patch('/prospects/:id', auth, (req, res) => {
+  router.patch('/prospects/:id', auth, async (req, res) => {
     const p = ownProspect(req);
     if (!p) return res.status(404).json({ error: 'Prospecto no encontrado' });
-    const { status, outcome } = z.object({
+    const { status, outcome, data } = z.object({
       status: z.enum(['active', 'stopped']).optional(),
       outcome: z.enum(OUTCOMES).optional(),
+      // Research: complete the lead's data and re-run the analysis right away.
+      data: z.object({
+        first_name: z.string().trim().max(120).optional(),
+        last_name: z.string().trim().max(120).optional(),
+        title: z.string().trim().max(200).optional(),
+        company: z.string().trim().max(200).optional(),
+        industry: z.string().trim().max(200).optional(),
+        country: z.string().trim().max(100).optional(),
+        phone: z.string().trim().max(60).optional(),
+        linkedin_url: z.string().trim().max(300).optional(),
+        source: z.string().trim().max(120).optional(),
+        lawful_basis: z.enum(Object.keys(LAWFUL_BASES)).optional(),
+      }).optional(),
     }).parse(req.body);
     const at = now();
+    if (data && Object.keys(data).length) {
+      const keys = Object.keys(data);
+      db.prepare(`UPDATE prospects SET ${keys.map((k) => `${k} = @${k}`).join(', ')} WHERE id = @id`).run({ ...data, id: p.id });
+      // Leads excluded only by the analysis can come back once their data is fixed.
+      if (p.status === 'stopped' && /^Excluido/.test(p.stop_reason || '')) {
+        db.prepare("UPDATE prospects SET status = 'active', stop_reason = NULL, next_send_at = ? WHERE id = ?").run(nowIso(at), p.id);
+      }
+      const fresh = db.prepare('SELECT * FROM prospects WHERE id = ?').get(p.id);
+      const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(p.campaign_id);
+      const { verdict } = await analyzeAndClassify(db, fresh, campaign, { analyzeFn, now });
+      if (verdict.status === 'ready' && !fresh.next_send_at && fresh.status === 'active' && campaign.status === 'active') {
+        db.prepare('UPDATE prospects SET next_send_at = ? WHERE id = ?').run(nowIso(at), p.id);
+      }
+      return res.json({ ok: true, lead_status: verdict.status, reasons: verdict.reasons });
+    }
     if (outcome) setOutcome(db, p, outcome, at);
     if (status === 'stopped') {
       db.prepare("UPDATE prospects SET status = 'stopped', next_send_at = NULL, stop_reason = 'Detenido manualmente' WHERE id = ?").run(p.id);
@@ -206,6 +244,107 @@ export function workRoutes(db, { now = () => new Date() } = {}) {
     if (!p) return res.status(404).json({ error: 'Prospecto no encontrado' });
     db.prepare('DELETE FROM prospects WHERE id = ?').run(p.id);
     res.status(204).end();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Variants: approve AI proposals, pause/resume in the A/B rotation
+  // ---------------------------------------------------------------------------
+  const ownVariant = (req) => db.prepare(
+    `SELECT v.*, s.campaign_id, s.step_number FROM variants v JOIN steps s ON s.id = v.step_id JOIN campaigns c ON c.id = s.campaign_id
+     WHERE v.id = ? AND c.user_id = ?`,
+  ).get(Number(req.params.id), req.user.id);
+
+  router.post('/variants/:id/:action', auth, (req, res) => {
+    const { action } = req.params;
+    if (!['approve', 'pause', 'activate', 'reject'].includes(action)) return res.status(404).json({ error: 'Acción desconocida' });
+    const v = ownVariant(req);
+    if (!v) return res.status(404).json({ error: 'Variante no encontrada' });
+    if (action === 'reject') {
+      if (v.status !== 'proposed') return res.status(400).json({ error: 'Solo se descartan variantes propuestas' });
+      db.prepare('DELETE FROM variants WHERE id = ?').run(v.id);
+      return res.json({ ok: true });
+    }
+    if (action === 'pause') {
+      const others = db.prepare("SELECT COUNT(*) AS n FROM variants WHERE step_id = ? AND id != ? AND status = 'active'").get(v.step_id, v.id).n;
+      if (!others) return res.status(400).json({ error: 'No se puede pausar la única variante activa del paso.' });
+    }
+    db.prepare('UPDATE variants SET status = ? WHERE id = ?').run(action === 'pause' ? 'paused' : 'active', v.id);
+    return res.json({ ok: true });
+  });
+
+  router.post('/campaigns/:id/ai/variants', auth, async (req, res) => {
+    const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ? AND user_id = ?').get(Number(req.params.id), req.user.id);
+    if (!campaign) return res.status(404).json({ error: 'Campaña no encontrada' });
+    if (generateFn === generateVariants && !openaiConfigured()) {
+      return res.status(400).json({ error: 'Configura la API key de OpenAI en Integraciones para generar textos.' });
+    }
+    const input = z.object({
+      step_number: z.number().int().min(1),
+      segment: z.string().trim().max(80).default(''),
+      count: z.number().int().min(1).max(3).default(2),
+      base_variant_id: z.number().int().optional(),
+    }).parse(req.body);
+    const step = loadSequence(db, campaign.id).find((st) => st.step_number === input.step_number);
+    if (!step) return res.status(404).json({ error: 'Paso no encontrado' });
+    const brand = campaign.brand_id ? db.prepare('SELECT * FROM brands WHERE id = ?').get(campaign.brand_id) : null;
+    if (!brand) return res.status(400).json({ error: 'Asigna una marca a la campaña: la IA escribe con su contexto.' });
+    const segment = input.segment ? db.prepare('SELECT * FROM segments WHERE campaign_id = ? AND name = ?').get(campaign.id, input.segment) : null;
+
+    const perf = performanceStats(db, campaign.id).variants;
+    const opened = new Map(db.prepare('SELECT variant_id AS id, SUM(open_count > 0) AS n FROM messages WHERE campaign_id = ? GROUP BY variant_id').all(campaign.id).map((r) => [r.id, r.n]));
+    const rate = (n, d) => (d ? Math.round((n / d) * 1000) / 10 : null);
+    const performance = step.variants
+      .filter((v) => v.status !== 'proposed' && (!segment || !v.segment_id || v.segment_id === segment.id))
+      .filter((v) => !input.base_variant_id || v.id === input.base_variant_id || (perf.get(v.id)?.sent || 0) > 0)
+      .map((v) => {
+        const st = perf.get(v.id) || { sent: 0, replied: 0 };
+        return { subject: v.subject, body: v.body, sent: st.sent, open_rate: rate(opened.get(v.id) || 0, st.sent), reply_rate: rate(st.replied, st.sent) };
+      });
+    const sample = db.prepare('SELECT fields_json FROM prospects WHERE campaign_id = ? LIMIT 1').get(campaign.id);
+    const result = await generateFn({
+      brand,
+      campaign,
+      segment,
+      stepNumber: step.step_number,
+      channel: step.channel,
+      sameThread: Boolean(step.same_thread),
+      count: input.count,
+      performance,
+      fields: Object.keys(JSON.parse(sample?.fields_json || '{}')).slice(0, 15),
+    });
+    const created = [];
+    db.transaction(() => {
+      for (const v of result.variants) {
+        const id = Number(db.prepare(
+          "INSERT INTO variants (step_id, label, angle, segment_id, subject, body, status, origin, rationale) VALUES (?, ?, ?, ?, ?, ?, 'proposed', 'ai', ?)",
+        ).run(step.id, `IA · ${v.label}`.slice(0, 60), v.angle, segment?.id ?? null, v.subject, v.body, v.rationale).lastInsertRowid);
+        created.push({ id, ...v });
+      }
+    })();
+    res.status(201).json({ model: result.model, variants: created });
+  });
+
+  router.get('/campaigns/:id/ab', auth, (req, res) => {
+    const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ? AND user_id = ?').get(Number(req.params.id), req.user.id);
+    if (!campaign) return res.status(404).json({ error: 'Campaña no encontrada' });
+    const perf = performanceStats(db, campaign.id).variants;
+    const opened = new Map(db.prepare('SELECT variant_id AS id, SUM(open_count > 0) AS n FROM messages WHERE campaign_id = ? GROUP BY variant_id').all(campaign.id).map((r) => [r.id, r.n]));
+    const rows = db.prepare(
+      `SELECT v.*, s.step_number, sg.name AS segment FROM variants v JOIN steps s ON s.id = v.step_id LEFT JOIN segments sg ON sg.id = v.segment_id
+       WHERE s.campaign_id = ? AND s.channel = 'email' ORDER BY s.step_number, v.id`,
+    ).all(campaign.id);
+    const groups = new Map();
+    for (const v of rows) {
+      const key = `${v.step_number}|${v.segment || ''}`;
+      if (!groups.has(key)) groups.set(key, { step_number: v.step_number, segment: v.segment || '', variants: [] });
+      const st = perf.get(v.id) || { sent: 0, replied: 0, positive: 0 };
+      groups.get(key).variants.push({
+        id: v.id, label: v.label, status: v.status, origin: v.origin, rationale: v.rationale, subject: v.subject, body: v.body,
+        sent: st.sent, replied: st.replied, positive: st.positive, opened: opened.get(v.id) || 0,
+      });
+    }
+    const list = [...groups.values()];
+    res.json({ groups: list, recommendations: abRecommendations(list), openai: openaiConfigured() });
   });
 
   return router;

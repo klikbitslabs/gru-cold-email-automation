@@ -4,10 +4,11 @@ import { z } from 'zod';
 import { config } from '../config.js';
 import { nowIso } from '../db.js';
 import { randomToken } from '../lib/crypto.js';
+import { upsertCompany } from '../lib/company.js';
 import { parseProspectsFile } from '../lib/csv.js';
 import { checkDraft } from '../lib/quality.js';
 import { templateFields } from '../lib/template.js';
-import { isValidTimeZone } from '../lib/time.js';
+import { campaignSchedule, isValidTimeZone } from '../lib/time.js';
 import { createMxChecker, LAWFUL_BASES, validateLeads } from '../lib/validate.js';
 import { requireAuth } from '../middleware/auth.js';
 import { analyzeProspect, decide } from '../services/jev.js';
@@ -19,6 +20,9 @@ const segmentRef = z.string().trim().max(80).default(''); // segment name ('' = 
 
 const variantSchema = z.object({
   id: z.number().int().optional(),
+  status: z.enum(['active', 'proposed', 'paused']).default('active'),
+  origin: z.enum(['manual', 'ai']).default('manual'),
+  rationale: z.string().trim().max(600).default(''),
   label: z.string().trim().min(1).max(60),
   angle: z.string().trim().max(500).default(''),
   segment: segmentRef,
@@ -47,7 +51,16 @@ const campaignSchema = z
     include_unsubscribe: z.boolean().default(true),
     jev_enabled: z.boolean().default(true),
     stop_on_reply: z.boolean().default(true),
-    approval_mode: z.enum(['all', 'first', 'issues', 'none']).default('first'),
+    approval_mode: z.enum(['all', 'first', 'issues', 'none']).default('all'),
+    brand_id: z.number().int().nullable().default(null),
+    schedule: z
+      .record(z.enum(['1', '2', '3', '4', '5', '6', '7']), z.object({ on: z.boolean(), start: HHMM, end: HHMM }))
+      .optional(),
+    max_per_day: z.number().int().min(1).max(2000).default(150),
+    delay_minutes: z.number().int().min(0).max(240).default(3),
+    max_contacts_per_company: z.number().int().min(1).max(20).default(3),
+    company_gap_days: z.number().int().min(0).max(30).default(2),
+    stop_on_company_reply: z.boolean().default(true),
     sender_ids: z.array(z.number().int()).default([]),
     segments: z
       .array(z.object({ id: z.number().int().optional(), name: z.string().trim().min(1).max(80), description: z.string().trim().max(500).default('') }))
@@ -72,6 +85,8 @@ const campaignSchema = z
       .default([]),
   })
   .refine((c) => c.window_start < c.window_end, { message: 'La ventana de envío debe terminar después de empezar', path: ['window_end'] })
+  .refine((c) => !c.schedule || Object.values(c.schedule).every((d) => !d.on || d.start < d.end), { message: 'Cada día activo debe terminar después de empezar', path: ['schedule'] })
+  .refine((c) => !c.schedule || Object.values(c.schedule).some((d) => d.on), { message: 'Activa al menos un día de envío', path: ['schedule'] })
   .refine((c) => c.steps.filter((s) => s.channel === 'email').length <= config.sequence.maxSteps, {
     message: `Máximo ${config.sequence.maxSteps} correos por secuencia`,
     path: ['steps'],
@@ -122,6 +137,9 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
       include_unsubscribe: Boolean(c.include_unsubscribe),
       jev_enabled: Boolean(c.jev_enabled),
       stop_on_reply: Boolean(c.stop_on_reply),
+      stop_on_company_reply: Boolean(c.stop_on_company_reply),
+      schedule: campaignSchedule(c),
+      brand: c.brand_id ? db.prepare('SELECT id, name FROM brands WHERE id = ?').get(c.brand_id) : null,
       sender_ids: db.prepare('SELECT sender_id FROM campaign_senders WHERE campaign_id = ?').all(c.id).map((r) => r.sender_id),
       segments,
       steps: loadSequence(db, c.id).map((s) => ({
@@ -130,7 +148,7 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
         channel: s.channel,
         delay_days: s.delay_days,
         same_thread: Boolean(s.same_thread),
-        variants: s.variants.map((v) => ({ id: v.id, label: v.label, angle: v.angle, segment: segName(v.segment_id), subject: v.subject, body: v.body })),
+        variants: s.variants.map((v) => ({ id: v.id, status: v.status, origin: v.origin, rationale: v.rationale, label: v.label, angle: v.angle, segment: segName(v.segment_id), subject: v.subject, body: v.body })),
       })),
       hooks: snippetOut('hook'),
       problems: snippetOut('problem'),
@@ -154,7 +172,21 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
       jev_enabled: data.jev_enabled ? 1 : 0,
       stop_on_reply: data.stop_on_reply ? 1 : 0,
       approval_mode: data.approval_mode,
+      brand_id: data.brand_id && db.prepare('SELECT 1 FROM brands WHERE id = ? AND user_id = ?').get(data.brand_id, userId) ? data.brand_id : null,
+      max_per_day: data.max_per_day,
+      delay_minutes: data.delay_minutes,
+      max_contacts_per_company: data.max_contacts_per_company,
+      company_gap_days: data.company_gap_days,
+      stop_on_company_reply: data.stop_on_company_reply ? 1 : 0,
     };
+    if (data.schedule) {
+      // Keep the legacy fields in sync: days with sending + widest window (used for time slots).
+      const on = Object.entries(data.schedule).filter(([, d]) => d.on);
+      settings.schedule_json = JSON.stringify(data.schedule);
+      settings.send_days = on.map(([d]) => d).sort().join(',');
+      settings.window_start = on.map(([, d]) => d.start).sort()[0];
+      settings.window_end = on.map(([, d]) => d.end).sort().reverse()[0];
+    }
     const keys = Object.keys(settings);
     let id = campaignId;
     if (!id) {
@@ -202,8 +234,8 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
         stepRow = { id: Number(db.prepare('INSERT INTO steps (campaign_id, step_number, delay_days, same_thread, channel) VALUES (?, ?, ?, ?, ?)').run(id, number, delay, step.same_thread ? 1 : 0, step.channel).lastInsertRowid) };
       }
       sync('variants', { column: 'step_id', value: stepRow.id }, step.variants,
-        (v) => Number(db.prepare('INSERT INTO variants (step_id, label, angle, segment_id, subject, body) VALUES (?, ?, ?, ?, ?, ?)').run(stepRow.id, v.label, v.angle, segId(v.segment), v.subject, v.body).lastInsertRowid),
-        (vid, v) => db.prepare('UPDATE variants SET label = ?, angle = ?, segment_id = ?, subject = ?, body = ? WHERE id = ?').run(v.label, v.angle, segId(v.segment), v.subject, v.body, vid));
+        (v) => Number(db.prepare('INSERT INTO variants (step_id, label, angle, segment_id, subject, body, status, origin, rationale) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(stepRow.id, v.label, v.angle, segId(v.segment), v.subject, v.body, v.status, v.origin, v.rationale).lastInsertRowid),
+        (vid, v) => db.prepare('UPDATE variants SET label = ?, angle = ?, segment_id = ?, subject = ?, body = ?, status = ?, origin = ?, rationale = ? WHERE id = ?').run(v.label, v.angle, segId(v.segment), v.subject, v.body, v.status, v.origin, v.rationale, vid));
     });
     db.prepare('DELETE FROM steps WHERE campaign_id = ? AND step_number > ?').run(id, data.steps.length);
 
@@ -231,7 +263,7 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
     }
     if (!full.steps.length) problems.push('La secuencia no tiene pasos.');
     const first = full.steps[0];
-    if (first?.variants.some((v) => !v.subject)) problems.push('Todas las variantes del primer correo necesitan asunto.');
+    if (first?.variants.some((v) => v.status === 'active' && !v.subject)) problems.push('Todas las variantes del primer correo necesitan asunto.');
     full.steps.forEach((s) => {
       if (s.channel !== 'email') return;
       if (!s.same_thread && s.step_number > 1 && s.variants.some((v) => !v.subject)) {
@@ -245,10 +277,11 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
     if (first) {
       const groups = full.segments.length ? full.segments.map((sg) => sg.name) : [''];
       for (const g of groups) {
-        const n = first.variants.filter((v) => v.segment === g || (!v.segment && !first.variants.some((x) => x.segment === g))).length;
+        const n = first.variants.filter((v) => v.status === 'active').filter((v) => v.segment === g || (!v.segment && !first.variants.some((x) => x.segment === g))).length;
         if (n < 2) recommendations.push(`Primer correo${g ? ` (segmento "${g}")` : ''}: crea 2–3 variantes de asunto para probar.`);
       }
     }
+    if (!c.brand_id) recommendations.push('Asigna una marca: su contexto (industrias, funciones, problemas y mensaje de referencia) guía el análisis y la redacción.');
     if (!c.icp.trim()) recommendations.push('Describe el ICP para que Jev puntúe el encaje y priorice.');
     if (!full.hooks.length) recommendations.push('Agrega ganchos de personalización ({{gancho}}) basados en datos verificables del archivo.');
     return { problems, recommendations };
@@ -311,7 +344,7 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
     const perf = performanceStats(db, c.id);
     const byStep = db.prepare('SELECT step_number, COUNT(*) AS sent, SUM(open_count > 0) AS opened FROM messages WHERE campaign_id = ? GROUP BY step_number ORDER BY step_number').all(c.id);
     const variants = db.prepare(
-      `SELECT v.id, v.label, s.step_number, sg.name AS segment FROM variants v JOIN steps s ON s.id = v.step_id
+      `SELECT v.id, v.label, v.status, v.origin, s.step_number, sg.name AS segment FROM variants v JOIN steps s ON s.id = v.step_id
        LEFT JOIN segments sg ON sg.id = v.segment_id WHERE s.campaign_id = ? AND s.channel = 'email' ORDER BY s.step_number, v.id`,
     ).all(c.id);
     const opened = new Map(db.prepare('SELECT variant_id AS id, SUM(open_count > 0) AS n FROM messages WHERE campaign_id = ? GROUP BY variant_id').all(c.id).map((r) => [r.id, r.n]));
@@ -370,9 +403,11 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
     const elsewhere = db.prepare('SELECT 1 FROM prospects p JOIN campaigns c ON c.id = p.campaign_id WHERE c.user_id = ? AND p.email = ? AND p.campaign_id != ? LIMIT 1');
     const insert = db.prepare(
       `INSERT OR IGNORE INTO prospects (campaign_id, email, first_name, last_name, company, title, industry, country, phone, linkedin_url,
-         source, lawful_basis, fields_json, validation_status, validation_notes, status, stop_reason, next_send_at, unsubscribe_token)
+         source, lawful_basis, fields_json, validation_status, validation_notes, status, stop_reason, next_send_at, unsubscribe_token,
+         company_id, lead_status, lead_status_reasons)
        VALUES (@campaign_id, @email, @first_name, @last_name, @company, @title, @industry, @country, @phone, @linkedin_url,
-         @source, @lawful_basis, @fields_json, @validation_status, @validation_notes, @status, @stop_reason, @next_send_at, @unsubscribe_token)`,
+         @source, @lawful_basis, @fields_json, @validation_status, @validation_notes, @status, @stop_reason, @next_send_at, @unsubscribe_token,
+         @company_id, @lead_status, @lead_status_reasons)`,
     );
     const result = {
       imported: 0,
@@ -413,6 +448,10 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
           stop_reason: invalid ? `Validación: ${notes.join('; ')}` : null,
           next_send_at: invalid ? null : nextSend,
           unsubscribe_token: randomToken(),
+          company_id: upsertCompany(db, req.user.id, p),
+          // Every lead starts in research until the commercial analysis classifies it.
+          lead_status: invalid ? 'excluded' : 'research',
+          lead_status_reasons: invalid ? notes.join('; ') : 'pendiente de análisis',
         });
         if (!r.changes) {
           result.duplicates += 1;
@@ -440,16 +479,18 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
     const where = ['p.campaign_id = @id'];
     if (req.query.status) where.push('p.status = @status');
     if (req.query.validation) where.push('p.validation_status = @validation');
+    if (req.query.lead) where.push('p.lead_status = @lead');
     if (req.query.segment) where.push(req.query.segment === 'none' ? 'p.segment_id IS NULL' : 'p.segment_id = @segment');
     if (req.query.q) where.push('(p.email LIKE @q OR p.first_name LIKE @q OR p.last_name LIKE @q OR p.company LIKE @q OR p.title LIKE @q)');
-    const params = { id: c.id, status: req.query.status, validation: req.query.validation, segment: Number(req.query.segment) || null, q: `%${req.query.q || ''}%` };
+    const params = { id: c.id, status: req.query.status, validation: req.query.validation, lead: req.query.lead, segment: Number(req.query.segment) || null, q: `%${req.query.q || ''}%` };
     const total = db.prepare(`SELECT COUNT(*) AS n FROM prospects p WHERE ${where.join(' AND ')}`).get(params).n;
     const rows = db.prepare(
       `SELECT p.id, p.email, p.first_name, p.last_name, p.company, p.title, p.industry, p.status, p.current_step, p.next_send_at, p.fit_score,
           p.stop_reason, p.reply_category, p.last_error, p.validation_status, p.validation_notes, p.outcome, p.intel_at, sg.name AS segment,
+          p.lead_status, p.lead_status_reasons, co.name AS company_name, p.company_id,
           (SELECT COALESCE(SUM(open_count), 0) FROM messages m WHERE m.prospect_id = p.id) AS opens,
           (SELECT COUNT(*) FROM drafts d WHERE d.prospect_id = p.id AND d.status = 'pending') AS pending_drafts
-       FROM prospects p LEFT JOIN segments sg ON sg.id = p.segment_id
+       FROM prospects p LEFT JOIN segments sg ON sg.id = p.segment_id LEFT JOIN companies co ON co.id = p.company_id
        WHERE ${where.join(' AND ')} ORDER BY p.id LIMIT ${size} OFFSET ${(page - 1) * size}`,
     ).all(params);
     const sample = db.prepare('SELECT fields_json FROM prospects WHERE campaign_id = ? LIMIT 1').get(c.id);

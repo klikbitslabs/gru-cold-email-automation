@@ -10,6 +10,7 @@ import { config } from '../config.js';
 import { nowIso } from '../db.js';
 import { decrypt, randomToken } from '../lib/crypto.js';
 import { buildMime, formatAddress, toBase64Url } from '../lib/mime.js';
+import { classifyLead } from '../lib/leads.js';
 import { checkDraft } from '../lib/quality.js';
 import { allFieldsPresent, buildEmailBody, prospectVariables, renderTemplate, templateFields } from '../lib/template.js';
 import { addDays, inSendWindow, localParts, nextLocalSlot } from '../lib/time.js';
@@ -135,7 +136,7 @@ export function candidatesFor(db, { campaign, prospect, step, sender }) {
   const problems = segmentItems(snippets.filter((s) => s.kind === 'problem'));
   const preview = (s) => ({ ...s, preview: renderTemplate(s.text, vars).text });
   return {
-    variants: forSegment(step.variants, prospect.segment_id),
+    variants: forSegment(step.variants.filter((v) => (v.status || 'active') === 'active'), prospect.segment_id),
     hooks: hooks.map(preview),
     problems: problems.map(preview),
     ctas: db.prepare('SELECT * FROM ctas WHERE campaign_id = ? ORDER BY id').all(campaign.id),
@@ -173,6 +174,58 @@ export function setOutcome(db, prospect, outcome, at = new Date()) {
   ).run(outcome, nowIso(at), `Resultado: ${outcome}`, prospect.id);
 }
 
+/** Question 4: is there verifiable data to personalize the first email? */
+export function verifiableData(db, campaign, prospect) {
+  const first = loadSequence(db, campaign.id).find((st) => st.channel === 'email');
+  const hooks = first ? candidatesFor(db, { campaign, prospect, step: first, sender: null }).hooks.map((h) => h.label) : [];
+  const vars = prospectVariables(prospect);
+  const fields = Object.keys(vars).filter((k) => !TRIVIAL_FIELDS.has(k) && !['email', 'phone', 'linkedin_url', 'source', 'lawful_basis'].includes(k) && vars[k]);
+  const anyHooks = db.prepare("SELECT 1 FROM snippets WHERE campaign_id = ? AND kind = 'hook' LIMIT 1").get(campaign.id);
+  return { ok: anyHooks ? hooks.length > 0 : fields.length > 0, hooks, fields: fields.slice(0, 6) };
+}
+
+/**
+ * Commercial intelligence for one lead: Jev/rules analysis + automatic lead state.
+ * Used after import (scheduler) and right after a person edits the lead's data.
+ */
+export async function analyzeAndClassify(db, prospect, campaign, { analyzeFn = analyzeProspect, now = () => new Date() } = {}) {
+  const segments = db.prepare('SELECT * FROM segments WHERE campaign_id = ? ORDER BY id').all(campaign.id);
+  const brand = campaign.brand_id ? db.prepare('SELECT * FROM brands WHERE id = ?').get(campaign.brand_id) : null;
+  const analysis = await analyzeFn({ campaign, prospect, segments, brand });
+  const withIndustry = { ...prospect, segment_id: analysis.segmentId ?? null };
+  const suppressed = Boolean(db.prepare('SELECT 1 FROM suppressions WHERE user_id = ? AND email = ?').get(campaign.user_id, prospect.email));
+  const activeElsewhere = Boolean(db.prepare(
+    `SELECT 1 FROM prospects p JOIN campaigns c ON c.id = p.campaign_id
+     WHERE c.user_id = ? AND p.email = ? AND p.id != ? AND p.status = 'active' AND p.current_step > 0 AND c.status = 'active' LIMIT 1`,
+  ).get(campaign.user_id, prospect.email, prospect.id));
+  const verdict = classifyLead({
+    prospect: withIndustry,
+    analysis,
+    brand,
+    suppressed,
+    activeElsewhere,
+    verifiable: verifiableData(db, campaign, withIndustry),
+  });
+  const at = new Date(now()).toISOString();
+  db.prepare('INSERT INTO decisions (prospect_id, step_number, engine, action, detail_json, created_at) VALUES (?, 0, ?, ?, ?, ?)')
+    .run(prospect.id, analysis.engine, verdict.status === 'excluded' ? 'exclude' : 'analyze', JSON.stringify({ ...analysis, lead_status: verdict.status, reasons: verdict.reasons }), at);
+  const update = {
+    segment_id: analysis.segmentId ?? null,
+    fit_score: analysis.fitScore ?? prospect.fit_score ?? null,
+    intel_json: JSON.stringify({ ...analysis, questions: verdict.questions }),
+    intel_at: at,
+    lead_status: verdict.status,
+    lead_status_reasons: verdict.reasons.join('; '),
+    industry: prospect.industry || analysis.inferredIndustry || '',
+  };
+  if (verdict.status === 'excluded' && prospect.status === 'active') {
+    Object.assign(update, { status: 'stopped', next_send_at: null, stop_reason: `Excluido: ${verdict.reasons.join('; ')}` });
+  }
+  const keys = Object.keys(update);
+  db.prepare(`UPDATE prospects SET ${keys.map((k) => `${k} = @${k}`).join(', ')} WHERE id = @id`).run({ ...update, id: prospect.id });
+  return { analysis, verdict };
+}
+
 export function createScheduler({
   db,
   gmailFor = (sender) => gmailForRefreshToken(decrypt(sender.refresh_token_enc)),
@@ -190,7 +243,7 @@ export function createScheduler({
        WHERE cs.campaign_id = ? AND s.status = 'active' ORDER BY s.id`,
     ),
     due: db.prepare(
-      `SELECT * FROM prospects WHERE campaign_id = ? AND status = 'active' AND intel_at IS NOT NULL
+      `SELECT * FROM prospects WHERE campaign_id = ? AND status = 'active' AND intel_at IS NOT NULL AND lead_status = 'ready'
          AND next_send_at IS NOT NULL AND next_send_at <= ?
        ORDER BY current_step DESC, fit_score IS NULL, fit_score DESC, next_send_at ASC LIMIT 200`,
     ),
@@ -305,19 +358,7 @@ export function createScheduler({
   // 2. Commercial intelligence
   // -------------------------------------------------------------------------
   async function analyzeOne(prospect, campaign) {
-    const segments = db.prepare('SELECT * FROM segments WHERE campaign_id = ? ORDER BY id').all(campaign.id);
-    const result = await analyzeFn({ campaign, prospect, segments });
-    const at = nowIso(now());
-    stmts.logDecision.run(prospect.id, 0, result.engine, result.exclude ? 'exclude' : 'analyze', JSON.stringify(result), at);
-    const update = {
-      segment_id: result.segmentId ?? null,
-      fit_score: result.fitScore ?? prospect.fit_score,
-      intel_json: JSON.stringify(result),
-      intel_at: at,
-    };
-    if (result.exclude) Object.assign(update, { status: 'stopped', next_send_at: null, stop_reason: 'Excluido por inteligencia comercial (no encaja con la oferta)' });
-    setProspect(prospect.id, update);
-    return { ...prospect, ...update };
+    await analyzeAndClassify(db, prospect, campaign, { analyzeFn, now });
   }
 
   async function analyzeLeads(limit = 25) {
@@ -472,6 +513,64 @@ export function createScheduler({
   // -------------------------------------------------------------------------
   // 3. Per-campaign orchestration
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Sending rules (campaign level) and account rules (company level)
+  // -------------------------------------------------------------------------
+  /** Campaign daily cap and minimum delay between two emails of the campaign. */
+  function campaignCanSend(campaign, at) {
+    const since = new Date(at.getTime() - DAY_MS).toISOString();
+    const sent = db.prepare('SELECT COUNT(*) AS n, MAX(sent_at) AS last FROM messages WHERE campaign_id = ? AND sent_at > ?').get(campaign.id, since);
+    if (campaign.max_per_day && sent.n >= campaign.max_per_day) return false;
+    if (campaign.delay_minutes && sent.last && at - new Date(sent.last) < campaign.delay_minutes * 60000) return false;
+    return true;
+  }
+
+  /**
+   * True when this contact must wait or stop because of its company:
+   *  - someone at the company already replied (any campaign) → stop the others;
+   *  - the campaign already started N contacts at this company → keep the rest in reserve;
+   *  - a colleague got a first email less than `company_gap_days` ago → wait.
+   */
+  function accountBlocked(campaign, prospect, stepNumber, at) {
+    if (campaign.stop_on_company_reply) {
+      const replied = db.prepare(
+        "SELECT first_name, email FROM prospects WHERE company_id = ? AND id != ? AND status = 'replied' AND reply_category IS NOT NULL AND reply_category NOT IN ('bounce','auto_reply') LIMIT 1",
+      ).get(prospect.company_id, prospect.id);
+      if (replied) {
+        setProspect(prospect.id, { status: 'stopped', next_send_at: null, stop_reason: `La empresa ya respondió (${replied.first_name || replied.email})` });
+        db.prepare("UPDATE drafts SET status = 'rejected', reviewed_at = ? WHERE prospect_id = ? AND status IN ('pending','approved')").run(nowIso(at), prospect.id);
+        return true;
+      }
+    }
+    if (stepNumber !== 1) return false;
+    const started = db.prepare(
+      `SELECT COUNT(*) AS n FROM prospects p WHERE p.campaign_id = ? AND p.company_id = ? AND p.id != ?
+         AND (p.current_step > 0 OR EXISTS (SELECT 1 FROM drafts d WHERE d.prospect_id = p.id AND d.status IN ('pending','approved')))`,
+    ).get(campaign.id, prospect.company_id, prospect.id).n;
+    if (campaign.max_contacts_per_company && started >= campaign.max_contacts_per_company) {
+      setProspect(prospect.id, {
+        status: 'stopped',
+        next_send_at: null,
+        stop_reason: `Reserva: ya hay ${started} contactos de esta empresa en la campaña (máximo ${campaign.max_contacts_per_company})`,
+      });
+      return true;
+    }
+    if (campaign.company_gap_days) {
+      const last = db.prepare(
+        `SELECT MAX(m.sent_at) AS t FROM messages m JOIN prospects p ON p.id = m.prospect_id
+         WHERE p.company_id = ? AND p.id != ? AND m.step_number = 1`,
+      ).get(prospect.company_id, prospect.id).t;
+      if (last) {
+        const allowed = new Date(new Date(last).getTime() + campaign.company_gap_days * DAY_MS);
+        if (allowed > at) {
+          setProspect(prospect.id, { next_send_at: nowIso(allowed) });
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   async function processCampaign(campaign, usedSenders) {
     const at = now();
     const senders = stmts.campaignSenders.all(campaign.id);
@@ -494,6 +593,8 @@ export function createScheduler({
         setProspect(prospect.id, { status: 'unsubscribed', next_send_at: null, stop_reason: 'En lista de supresión' });
         continue;
       }
+      // Account rules: work per company, not per address.
+      if (prospect.company_id && accountBlocked(campaign, prospect, stepNumber, at)) continue;
       if (step.channel !== 'email') {
         createTask({ campaign, prospect, step, senders });
         continue;
@@ -518,7 +619,7 @@ export function createScheduler({
         if (!sender) continue;
         draft = await createDraft({ campaign, prospect, step, sender, totalSteps: sequence.length, stats });
       }
-      if (draft.status !== 'approved' || !sendingOpen) continue;
+      if (draft.status !== 'approved' || !sendingOpen || !campaignCanSend(campaign, at)) continue;
 
       const sender = senders.find((s) => s.id === draft.sender_id);
       if (!sender) {

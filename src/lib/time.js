@@ -66,13 +66,31 @@ export const parseDays = (sendDays) =>
     .map((d) => Number(d.trim()))
     .filter((d) => d >= 1 && d <= 7);
 
+/**
+ * Per-day sending schedule: { "1": { on, start, end }, … "7": … } (1 = Monday).
+ * Campaigns without one fall back to send_days + a single window.
+ */
+export function campaignSchedule(campaign) {
+  if (campaign.schedule_json) {
+    try {
+      return JSON.parse(campaign.schedule_json);
+    } catch {
+      /* fall through */
+    }
+  }
+  const days = parseDays(campaign.send_days);
+  return Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map((d) => [d, { on: days.includes(d), start: campaign.window_start, end: campaign.window_end }]));
+}
+
 export function inSendWindow(campaign, date) {
   const p = localParts(date, campaign.timezone);
-  return (
-    parseDays(campaign.send_days).includes(p.weekday) &&
-    p.minuteOfDay >= parseHHMM(campaign.window_start) &&
-    p.minuteOfDay < parseHHMM(campaign.window_end)
-  );
+  const day = campaignSchedule(campaign)[p.weekday];
+  return Boolean(day?.on) && p.minuteOfDay >= parseHHMM(day.start) && p.minuteOfDay < parseHHMM(day.end);
+}
+
+/** Minutes of sending time per week, used for the "how long will N emails take" summary. */
+export function weeklySendingMinutes(schedule) {
+  return Object.values(schedule).reduce((sum, d) => sum + (d.on ? Math.max(0, parseHHMM(d.end) - parseHHMM(d.start)) : 0), 0);
 }
 
 /**

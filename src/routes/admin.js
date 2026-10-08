@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { requireAuth } from '../middleware/auth.js';
 import { GOOGLE_SCOPES, redirectUri } from '../services/google.js';
 import { testJevConnection } from '../services/jev.js';
+import { testOpenAIConnection } from '../services/openai.js';
 import { integrations, publicSettings, updateSettings } from '../services/settings.js';
 
 const optionalText = (max) => z.union([z.string().trim().max(max), z.null()]).optional();
@@ -20,6 +21,8 @@ const patchSchema = z.object({
   allow_consumer_gmail: z.union([z.enum(['true', 'false']), z.null()]).optional(),
   typesafe_api_key: optionalText(300),
   typesafe_model: z.union([z.string().trim().regex(/^$|^[\w.:/-]{2,80}$/, 'Nombre de modelo inválido'), z.null()]).optional(),
+  openai_api_key: optionalText(300),
+  openai_model: z.union([z.string().trim().regex(/^$|^[\w.:/-]{2,80}$/, 'Nombre de modelo inválido'), z.null()]).optional(),
 });
 
 /**
@@ -46,7 +49,7 @@ export async function testGoogleCredentials({ fetchFn = fetch } = {}) {
   }
 }
 
-export function adminRoutes(db, { testJev = testJevConnection, testGoogle = testGoogleCredentials } = {}) {
+export function adminRoutes(db, { testJev = testJevConnection, testGoogle = testGoogleCredentials, testOpenAI = testOpenAIConnection } = {}) {
   const router = Router();
   router.use(requireAuth(db));
   router.use((req, res, next) => {
@@ -77,6 +80,7 @@ export function adminRoutes(db, { testJev = testJevConnection, testGoogle = test
 
   router.post('/integrations/test-jev', async (req, res) => res.json(await testJev()));
   router.post('/integrations/test-google', async (req, res) => res.json(await testGoogle()));
+  router.post('/integrations/test-openai', async (req, res) => res.json(await testOpenAI()));
 
   return router;
 }

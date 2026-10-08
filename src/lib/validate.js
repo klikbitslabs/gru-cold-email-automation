@@ -9,7 +9,7 @@ const ROLE_LOCAL_PARTS = new Set([
   'compras', 'webmaster', 'postmaster', 'abuse', 'noreply', 'no-reply', 'no_reply', 'notificaciones', 'newsletter',
 ]);
 
-const FREE_DOMAINS = new Set([
+export const FREE_DOMAINS = new Set([
   'gmail.com', 'googlemail.com', 'hotmail.com', 'hotmail.es', 'outlook.com', 'outlook.es', 'live.com', 'msn.com',
   'yahoo.com', 'yahoo.es', 'ymail.com', 'icloud.com', 'me.com', 'aol.com', 'proton.me', 'protonmail.com', 'gmx.com',
 ]);

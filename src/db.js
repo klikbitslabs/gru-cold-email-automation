@@ -172,6 +172,36 @@ CREATE TABLE IF NOT EXISTS app_settings (
   updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL
 );
 
+-- Brands: the commercial context every campaign of that brand uses (Jev analysis, AI copy).
+CREATE TABLE IF NOT EXISTS brands (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  website TEXT NOT NULL DEFAULT '',
+  value_proposition TEXT NOT NULL DEFAULT '',
+  tone TEXT NOT NULL DEFAULT '',
+  industries TEXT NOT NULL DEFAULT '',      -- 1. Industria y operación
+  functions TEXT NOT NULL DEFAULT '',       -- 2. Función del contacto
+  problems TEXT NOT NULL DEFAULT '',        -- 3. Problema que queremos resolver
+  ref_subject TEXT NOT NULL DEFAULT '',     -- 4. Mensaje de referencia
+  ref_email TEXT NOT NULL DEFAULT '',
+  ref_call TEXT NOT NULL DEFAULT '',
+  avoid TEXT NOT NULL DEFAULT '',           -- words/claims never to use
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+-- Accounts: outreach works per company, not just per address.
+CREATE TABLE IF NOT EXISTS companies (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  domain TEXT NOT NULL DEFAULT '',
+  industry TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE (user_id, key)
+);
+
 -- Commercial segments (e.g. "Retail - Gerente comercial"). Jev assigns each prospect to one.
 CREATE TABLE IF NOT EXISTS segments (
   id INTEGER PRIMARY KEY,
@@ -238,12 +268,25 @@ const ADDED_COLUMNS = {
   },
   campaigns: {
     approval_mode: "TEXT NOT NULL DEFAULT 'first'",
+    brand_id: 'INTEGER REFERENCES brands(id) ON DELETE SET NULL',
+    // Sending rules ("autopilot"): per-day windows, campaign daily cap and pacing.
+    schedule_json: 'TEXT',
+    max_per_day: 'INTEGER NOT NULL DEFAULT 150',
+    delay_minutes: 'INTEGER NOT NULL DEFAULT 3',
+    // Account rules.
+    max_contacts_per_company: 'INTEGER NOT NULL DEFAULT 3',
+    company_gap_days: 'INTEGER NOT NULL DEFAULT 2',
+    stop_on_company_reply: 'INTEGER NOT NULL DEFAULT 1',
   },
   steps: {
     channel: "TEXT NOT NULL DEFAULT 'email'",
   },
   variants: {
     segment_id: 'INTEGER REFERENCES segments(id) ON DELETE SET NULL',
+    // active = in rotation; proposed = AI/challenger waiting for approval; paused = removed from A/B.
+    status: "TEXT NOT NULL DEFAULT 'active'",
+    origin: "TEXT NOT NULL DEFAULT 'manual'",
+    rationale: "TEXT NOT NULL DEFAULT ''",
   },
   prospects: {
     industry: "TEXT NOT NULL DEFAULT ''",
@@ -259,15 +302,27 @@ const ADDED_COLUMNS = {
     intel_at: 'TEXT',
     outcome: 'TEXT',
     outcome_at: 'TEXT',
+    company_id: 'INTEGER REFERENCES companies(id) ON DELETE SET NULL',
+    // ready = Apto para campaña; research = Requiere investigación; excluded = Excluido de campaña.
+    lead_status: "TEXT NOT NULL DEFAULT 'research'",
+    lead_status_reasons: "TEXT NOT NULL DEFAULT ''",
   },
 };
 
 function migrate(db) {
+  const added = new Set();
   for (const [table, columns] of Object.entries(ADDED_COLUMNS)) {
     const existing = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
     for (const [name, definition] of Object.entries(columns)) {
-      if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+      if (!existing.has(name)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+        added.add(`${table}.${name}`);
+      }
     }
+  }
+  // Leads imported before lead states existed keep their current behaviour.
+  if (added.has('prospects.lead_status')) {
+    db.exec("UPDATE prospects SET lead_status = CASE WHEN status = 'active' THEN 'ready' ELSE 'excluded' END");
   }
   // The first account is the administrator (manages integrations / API keys).
   if (!db.prepare('SELECT 1 FROM users WHERE is_admin = 1').get()) {

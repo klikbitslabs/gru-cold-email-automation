@@ -58,6 +58,45 @@ Resultados y aprendizaje
 
 Los **errores** siempre requieren a una persona (editar o confirmar). Las **advertencias** van a la cola de aprobación según el modo de la campaña.
 
+## Marcas, empresas y decisiones antes de actuar
+
+**Marcas (varias por cuenta).** Cada campaña usa una marca. La marca define:
+1. **Industria y operación** (p. ej. Retail, distribución, farmacias, importadoras)
+2. **Función del contacto** (p. ej. Demand Planning, Supply Chain, Compras, Dirección)
+3. **Problema que queremos resolver** (p. ej. errores de pronóstico, faltantes, exceso, reposición)
+4. **Mensaje específico de referencia** (asunto + correo + argumento de llamada)
+
+más propuesta de valor, tono y palabras prohibidas. Ese contexto alimenta el análisis de Jev, la redacción con OpenAI y los guiones de llamada.
+
+**Las 5 preguntas antes de actuar** (visibles en el detalle de cada prospecto):
+
+| # | Pregunta | Quién responde |
+|---|---|---|
+| 1 | ¿Esta empresa realmente encaja con la marca? | Jev (score contra las industrias de la marca; infiere la industria si falta) |
+| 2 | ¿Esta persona tiene responsabilidades relacionadas con lo que vendemos? | Jev (score contra las funciones de la marca) |
+| 3 | ¿Qué problema podría importarle según su cargo e industria? | Jev (elige entre los problemas de la marca) |
+| 4 | ¿Tenemos información suficiente y verificable para personalizar? | Código (ganchos con todos sus datos presentes) |
+| 5 | ¿Cuál es la siguiente acción según su historial? | Código (paso siguiente, borrador, tarea, empresa que ya respondió…) |
+
+Sin clave de Jev, 1–3 se responden por coincidencia de palabras clave y, ante la duda, el lead queda en investigación (nunca se excluye por suposición).
+
+**Estados automáticos de los leads:**
+- **Apto para campaña** — empresa y cargo relevantes, email verificado, datos suficientes, base legal permitida y sin exclusiones.
+- **Requiere investigación** — falta cargo, industria, procedencia o verificación. No se programa. Desde el detalle del prospecto puedes completar los datos y se reanaliza al instante.
+- **Excluido de campaña** — opt-out, rebote permanente, duplicado activo, contacto no apropiado, empresa que no encaja o base legal no permitida.
+
+**Empresas.** Los leads se agrupan por dominio corporativo (o nombre). La vista *Empresas* muestra el estado de cada cuenta y sus contactos en todas las campañas. Reglas por campaña: máximo de contactos por empresa (por defecto 3; el resto queda en reserva), días entre el primer correo a colegas y detener a los colegas cuando alguien de la empresa responde.
+
+## Reglas de envío
+
+Pestaña *Reglas de envío* de cada campaña (como un "autopilot"): días y horario **por día** (p. ej. L–V 08:00–17:00, sábado 09:00–13:00, domingo apagado), zona horaria, **máximo de correos por día** de la campaña y **pausa entre correos** en minutos, con un resumen de cuánto tardan 100 correos. Los límites diarios y pausas de cada sender se siguen respetando.
+
+## Redacción con IA y pruebas A/B supervisadas
+
+- **OpenAI** (clave en *Integraciones*): en cada paso, *✨ Proponer variantes con IA* escribe asuntos y correos con el contexto de la marca, las reglas de calidad y los resultados de las variantes ganadoras (apertura y respuesta). Cada variante incluye la hipótesis que prueba.
+- **Supervisión**: las variantes de IA entran como **propuestas** y no se envían hasta que las apruebas. Además, cada correo pasa por el control de calidad y por la cola de aprobación (modo por defecto: aprobar todos los correos).
+- **A/B**: Jev reparte las variantes activas por prospecto y aprende de su historial. La pestaña *Pruebas A/B* compara variantes con una prueba estadística (mínimo 30 envíos por variante) y **recomienda** pausar perdedoras o generar retadores; tú apruebas cada acción.
+
 ## Funcionalidades de la plataforma
 
 - **Login JWT** con correo y contraseña (bcrypt, HS256, límite de intentos).
@@ -85,7 +124,7 @@ Requisitos: Node.js ≥ 20.
 npm install
 cp .env.example .env   # completa JWT_SECRET y ENCRYPTION_KEY; el resto se carga en Integraciones
 npm start              # http://localhost:3000
-npm test               # 26 pruebas (auth, integraciones, importación, validación, calidad, Jev, flujo completo)
+npm test               # 32 pruebas (auth, integraciones, marcas, empresas, reglas de envío, IA, A/B, flujo completo)
 ```
 
 Crea tu cuenta en `/#/register` y luego pon `ALLOW_REGISTRATION=false`.
@@ -99,6 +138,7 @@ El primer usuario que se registra es el **administrador** y ve el menú **Integr
 | Google Client ID y Client Secret | Integraciones → Google Workspace | El panel muestra la **URI de redireccionamiento** y el **origen** exactos para copiarlos en Google Cloud; **Probar conexión** verifica las credenciales y la URI con Google. |
 | Dominios permitidos / cuentas @gmail.com | Integraciones → Google Workspace | Opcional. |
 | API key y modelo de Jev | Integraciones → Jev | **Probar conexión** hace una pregunta mínima a la API. |
+| API key y modelo de OpenAI | Integraciones → OpenAI | Para proponer textos; **Probar conexión** hace una llamada mínima. |
 | `JWT_SECRET`, `ENCRYPTION_KEY` | Variables de Railway | **Solo aquí**: protegen las sesiones y cifran las claves del panel. No cambies `ENCRYPTION_KEY` después de guardar claves. |
 
 Las claves del panel se guardan cifradas (AES-256-GCM) y nunca se devuelven completas al navegador. Un valor del panel tiene prioridad sobre la variable de entorno del mismo nombre (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TYPESAFE_API_KEY`, `TYPESAFE_MODEL`, `ALLOWED_GOOGLE_DOMAINS`, `ALLOW_CONSUMER_GMAIL`), que siguen funcionando como alternativa.
@@ -174,6 +214,7 @@ test/                  node:test + supertest con Gmail y Jev simulados
 - Las aperturas son orientativas: Apple Mail Privacy Protection precarga imágenes y algunos clientes las bloquean.
 - Las respuestas se detectan en el hilo y por búsqueda `from:` en el buzón del sender; si el prospecto responde desde otra dirección, puede no detectarse.
 - El límite diario es una ventana móvil de 24 h por sender (compartida entre campañas).
-- La generación es por **selección** (plantillas + bibliotecas elegidas por Jev), no por texto libre: Jev no redacta, decide. Así cada frase es revisable y cada dato es verificable. Si más adelante quieres redacción libre por prospecto, se puede agregar un modelo generativo detrás del mismo control de calidad y aprobación.
+- Jev decide (no redacta). La redacción con IA es de OpenAI y solo **propone** variantes a nivel de plantilla, que una persona aprueba; la personalización por prospecto sigue siendo verificable (ganchos con datos reales) y cada correo pasa por calidad y aprobación.
+- El modelo de OpenAI por defecto es `gpt-4.1-mini`; cámbialo en Integraciones si tu cuenta usa otro.
 - La integración con CRM (importación directa) no está incluida aún; se importa por CSV/Excel.
 - No se probó contra Google ni contra la API de TypeSafe reales en este entorno (sin credenciales); las pruebas usan dobles que siguen el contrato del SDK oficial `@typesafe-ai/sdk` y de la Gmail API.

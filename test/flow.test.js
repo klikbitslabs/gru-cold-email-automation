@@ -18,6 +18,7 @@ const campaignBody = (senderIds) => ({
   window_start: '08:00',
   window_end: '17:00',
   approval_mode: 'none',
+  delay_minutes: 0,
   sender_ids: senderIds,
   steps: [
     { delay_days: 0, same_thread: true, variants: [{ label: 'Dolor', angle: 'pain point', subject: 'idea para {{company}}', body: 'Hola {{first_name}},\n\nvi que {{company}} está en {{ciudad|tu ciudad}}. {{cta}}' }] },
@@ -70,7 +71,7 @@ test('full sequence: import, send, open, threaded follow-up, reply stops it', as
   const campaignId = created.body.campaign.id;
   assert.equal(created.body.campaign.steps.length, 3);
 
-  const csv = 'first_name,last_name,email,company,ciudad\nAna,Pérez,ana@cliente.com,Cliente SA,Panamá\nLuis,Gómez,luis@otro.com,Otro SA,\nAna,Pérez,ana@cliente.com,Dup,\n';
+  const csv = 'first_name,last_name,email,company,cargo,sector,ciudad\nAna,Pérez,ana@cliente.com,Cliente SA,Gerente,Retail,Panamá\nLuis,Gómez,luis@otro.com,Otro SA,Director,Logística,\nAna,Pérez,ana@cliente.com,Dup,,,\n';
   const imported = await request(app).post(`/api/campaigns/${campaignId}/prospects/import`).set(auth).field('source', 'CRM propio').field('lawful_basis', 'interes_legitimo').attach('file', Buffer.from(csv), 'p.csv');
   assert.equal(imported.status, 200);
   assert.equal(imported.body.imported, 2);
@@ -167,7 +168,7 @@ test('auto-replies keep the sequence running; unsubscribe stops it and suppresse
   const senderId = insertSender(db, userId);
   const { body } = await request(app).post('/api/campaigns').set(auth).send(campaignBody([senderId]));
   await request(app).post(`/api/campaigns/${body.campaign.id}/prospects/import`).set(auth)
-    .field('source', 'CRM propio').field('lawful_basis', 'interes_legitimo').attach('file', Buffer.from('email,first_name,company\nana@cliente.com,Ana,Cliente SA\n'), 'p.csv');
+    .field('source', 'CRM propio').field('lawful_basis', 'interes_legitimo').attach('file', Buffer.from('email,first_name,company,cargo,sector\nana@cliente.com,Ana,Cliente SA,Gerente,Retail\n'), 'p.csv');
   await request(app).post(`/api/campaigns/${body.campaign.id}/status`).set(auth).send({ status: 'active' });
   await scheduler.tick();
   const ana = db.prepare('SELECT * FROM prospects').get();
@@ -206,7 +207,7 @@ test('Jev decisions pick variants/CTAs, stop non-fits and move sends to the pref
   data.steps[0].variants.push({ label: 'Prueba social', angle: 'case study', subject: 'cómo {{company}} podría', body: 'Hola {{first_name}}, ayudamos a una empresa como {{company}}. {{cta}}' });
   const { body } = await request(app).post('/api/campaigns').set(auth).send(data);
   await request(app).post(`/api/campaigns/${body.campaign.id}/prospects/import`).set(auth)
-    .field('source', 'CRM propio').field('lawful_basis', 'interes_legitimo').attach('file', Buffer.from('email,first_name,company\ncompetidor@rival.com,Rival,Rival\nana@cliente.com,Ana,Cliente SA\n'), 'p.csv');
+    .field('source', 'CRM propio').field('lawful_basis', 'interes_legitimo').attach('file', Buffer.from('email,first_name,company,cargo,sector\ncompetidor@rival.com,Rival,Rival,CEO,Software\nana@cliente.com,Ana,Cliente SA,Gerente,Retail\n'), 'p.csv');
   await request(app).post(`/api/campaigns/${body.campaign.id}/status`).set(auth).send({ status: 'active' });
 
   await scheduler.tick(); // 10:00 local = "early" slot → both decided, Ana rescheduled to 14:00

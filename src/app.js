@@ -9,18 +9,20 @@ import { LAWFUL_BASES } from './lib/validate.js';
 import { requireAuth } from './middleware/auth.js';
 import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
+import { brandRoutes } from './routes/brands.js';
 import { campaignRoutes } from './routes/campaigns.js';
+import { companyRoutes } from './routes/companies.js';
 import { senderRoutes } from './routes/senders.js';
 import { trackingRoutes } from './routes/tracking.js';
 import { workRoutes } from './routes/work.js';
-import { bindSettings, googleConfigured, integrations, jevConfigured } from './services/settings.js';
+import { bindSettings, googleConfigured, integrations, jevConfigured, openaiConfigured } from './services/settings.js';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 /**
- * @param deps { db, scheduler?, gmailFor?, decideFn?, analyzeFn?, mx?, now?, testJev?, testGoogle? } — injectable for tests.
+ * @param deps { db, scheduler?, gmailFor?, decideFn?, analyzeFn?, generateFn?, mx?, now?, testJev?, testGoogle?, testOpenAI? } — injectable for tests.
  */
-export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, mx, now, testJev, testGoogle } = {}) {
+export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, generateFn, mx, now, testJev, testGoogle, testOpenAI } = {}) {
   bindSettings(db);
   const inject = (deps) => Object.fromEntries(Object.entries(deps).filter(([, v]) => v !== undefined));
   const app = express();
@@ -51,16 +53,20 @@ export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, mx, no
 
   app.use('/api', express.json({ limit: '1mb' }));
   app.use('/api/auth', authRoutes(db));
-  app.use('/api/admin', adminRoutes(db, inject({ testJev, testGoogle })));
+  app.use('/api/admin', adminRoutes(db, inject({ testJev, testGoogle, testOpenAI })));
   app.use('/api/senders', senderRoutes(db, gmailFor ? { gmailFor } : {}));
+  app.use('/api/brands', brandRoutes(db));
+  app.use('/api/companies', companyRoutes(db));
   app.use('/api/campaigns', campaignRoutes(db, inject({ decideFn, analyzeFn, now, mx })));
-  app.use('/api', workRoutes(db, inject({ now })));
+  app.use('/api', workRoutes(db, inject({ now, analyzeFn, generateFn })));
 
   app.get('/api/meta', (req, res) => {
     res.json({
       google_configured: googleConfigured(),
       jev_configured: jevConfigured(),
       jev_model: integrations.typesafe().model,
+      openai_configured: openaiConfigured(),
+      openai_model: integrations.openai().model,
       max_steps: config.sequence.maxSteps,
       max_total_steps: 7,
       base_url: config.baseUrl,
