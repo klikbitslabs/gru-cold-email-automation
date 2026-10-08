@@ -97,6 +97,30 @@ Pestaña *Reglas de envío* de cada campaña (como un "autopilot"): días y hora
 - **Supervisión**: las variantes de IA entran como **propuestas** y no se envían hasta que las apruebas. Además, cada correo pasa por el control de calidad y por la cola de aprobación (modo por defecto: aprobar todos los correos).
 - **A/B**: Jev reparte las variantes activas por prospecto y aprende de su historial. La pestaña *Pruebas A/B* compara variantes con una prueba estadística (mínimo 30 envíos por variante) y **recomienda** pausar perdedoras o generar retadores; tú apruebas cada acción.
 
+## Analítica avanzada y centro de decisiones
+
+**Analítica** (menú *Analítica*): filtros por periodo (7/30/90 días), marca y campaña.
+- KPIs con variación contra el periodo anterior: enviados, apertura, respuesta, respuestas positivas, reuniones, rebote, bajas y tiempo medio hasta abrir/responder.
+- Actividad diaria (enviados, aperturas, respuestas) con tooltip y vista de tabla.
+- **¿Cuándo abren tus prospectos?** Mapa de calor día × hora de aperturas humanas (se excluyen los escáneres de seguridad), en la zona horaria de cada campaña.
+- **¿Qué funciona mejor?** Desglose por campaña, paso, asunto/variante, sender, segmento, industria y cargo. Las respuestas se atribuyen al último correo que recibió cada persona.
+- Respuestas por tipo y estado de los leads (apto / investigación / excluido).
+
+**Decisiones** (menú *Decisiones*, con contador): cada hora (o con *Analizar ahora*) la plataforma revisa los resultados y propone qué cambiar, con la evidencia:
+
+| Recomendación | Cuándo |
+|---|---|
+| Pausar variante perdedora | Prueba estadística con ≥30 envíos por variante |
+| Proponer textos nuevos con IA | Apertura < 20% con ≥40 envíos (asuntos nuevos), seguimiento con 0 respuestas en ≥40 envíos, o retador para la ganadora |
+| Activar variantes propuestas | Propuestas de IA que pasan el control de calidad |
+| Aprobar borradores | Borradores sin errores esperando más de 2 h (o ≥10) |
+| Pausar sender | Rebote > 5% con ≥20 envíos en 14 días |
+| Ajustar ventana de envío | < 60% de las aperturas cae en la ventana actual y otra ventana cubre ≥15 pp más |
+| Subir límite diario | El límite se alcanza, hay ≥20 leads aptos esperando, rebote < 3% y los buzones tienen capacidad |
+| Avisos | Leads en investigación, bajas > 2%, segmento con respuesta muy baja, sender desconectado, buzones al máximo |
+
+Cada recomendación se **aprueba** (se aplica en el momento) o se **descarta** (se silencia 14 días). En *Permisos de automatización* eliges qué tipos puede aplicar la plataforma sola: **Supervisado** (nada), **Recomendado** (pausar perdedoras, proponer textos, pausar senders, ajustar ventana) o **Autopiloto** (todo). Los borradores y variantes con errores de calidad siempre esperan a una persona, y todo lo automático queda en el historial.
+
 ## Funcionalidades de la plataforma
 
 - **Login JWT** con correo y contraseña (bcrypt, HS256, límite de intentos).
@@ -199,12 +223,14 @@ src/
   config.js / db.js    configuración y esquema SQLite
   middleware/auth.js   JWT
   routes/              auth, senders (OAuth), campaigns (CRUD, importación, vista previa, resultados),
-                       work (aprobación, tareas, resultados por prospecto), tracking (pixel, baja)
+                       work (aprobación, tareas, resultados por prospecto), tracking (pixel, baja),
+                       analytics (analítica avanzada + centro de decisiones)
   services/
     google.js          OAuth + Gmail REST (send, threads, search, firma)
     jev.js             análisis comercial, decisión del mensaje y clasificación de respuestas
     scheduler.js       orquestador: análisis, borradores, aprobación, envío, tareas, respuestas
-  lib/                 csv (CSV/Excel), validate (leads), quality (reglas), plantillas, MIME, zonas horarias, cifrado
+    decisions.js       recomendaciones, permisos de automatización y ejecución de acciones
+  lib/                 analytics (KPIs, mapa de calor, desgloses), csv (CSV/Excel), validate (leads), quality (reglas), plantillas, MIME, zonas horarias, cifrado
 public/                SPA sin build (HTML/CSS/JS)
 test/                  node:test + supertest con Gmail y Jev simulados
 ```

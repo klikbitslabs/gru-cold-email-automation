@@ -75,13 +75,20 @@ const brandBlock = (brand) => [
   brand.avoid && `Nunca uses estas palabras o promesas: ${brand.avoid}`,
 ].filter(Boolean).join('\n');
 
+// Why the decision center asked for new copy (see services/decisions.js).
+const FOCUS = {
+  subject: 'la tasa de apertura es baja; prueba asuntos claramente distintos (más específicos para el cargo o el problema) y mantén el cuerpo que mejor funciona.',
+  followup: 'este seguimiento no está generando respuestas; cambia el ángulo (otro problema, prueba social concreta o un cierre respetuoso) en lugar de repetir el mensaje anterior.',
+  challenger: 'crea retadores de la variante ganadora cambiando una sola cosa a la vez.',
+};
+
 /**
  * Proposes new email variants for a step/segment.
  * @param ctx { brand, campaign, segment, stepNumber, channel, count, sameThread, performance: [{ subject, body, sent, open_rate, reply_rate }], fields }
  * @returns {Promise<{ variants: Array, model: string }>}
  */
 export async function generateVariants(ctx, { fetchFn = fetch } = {}) {
-  const { brand, campaign, segment, stepNumber, channel = 'email', count = 2, performance = [], fields = [], sameThread = true } = ctx;
+  const { brand, campaign, segment, stepNumber, channel = 'email', count = 2, performance = [], fields = [], sameThread = true, focus = '' } = ctx;
   const isFirst = stepNumber === 1;
   const ranked = [...performance].sort((a, b) => (b.reply_rate ?? 0) - (a.reply_rate ?? 0) || (b.open_rate ?? 0) - (a.open_rate ?? 0));
   const history = ranked.length
@@ -118,7 +125,7 @@ ${rules}
 Resultados de las variantes actuales (de mejor a peor):
 ${history}
 
-Escribe ${count} variante(s) nuevas para probar en A/B. Si hay ganadoras, conserva lo que las hace funcionar y prueba UNA diferencia clara por variante (asunto, ángulo o problema). En "rationale" explica en una frase qué hipótesis prueba cada una.`;
+${FOCUS[focus] ? `Objetivo de esta ronda: ${FOCUS[focus]}\n\n` : ''}Escribe ${count} variante(s) nuevas para probar en A/B. Si hay ganadoras, conserva lo que las hace funcionar y prueba UNA diferencia clara por variante (asunto, ángulo o problema). En "rationale" explica en una frase qué hipótesis prueba cada una.`;
 
   const { json, model } = await chatJSON({ system, user, fetchFn });
   const parsed = generatedSchema.parse(json);

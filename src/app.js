@@ -8,6 +8,7 @@ import { lintTemplate } from './lib/quality.js';
 import { LAWFUL_BASES } from './lib/validate.js';
 import { requireAuth } from './middleware/auth.js';
 import { adminRoutes } from './routes/admin.js';
+import { analyticsRoutes } from './routes/analytics.js';
 import { authRoutes } from './routes/auth.js';
 import { brandRoutes } from './routes/brands.js';
 import { campaignRoutes } from './routes/campaigns.js';
@@ -74,6 +75,8 @@ export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, genera
       lawful_bases: LAWFUL_BASES,
     });
   });
+
+  app.use('/api', analyticsRoutes(db, inject({ now, generateFn })));
 
   app.post('/api/lint', requireAuth(db), (req, res) => {
     const input = z.object({

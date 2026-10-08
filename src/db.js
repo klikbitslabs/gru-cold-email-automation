@@ -258,6 +258,36 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   completed_at TEXT
 );
+
+-- Decision center: recommendations computed from the results (what to change and why).
+-- A person approves or dismisses each one, unless they granted automatic permission for its type.
+CREATE TABLE IF NOT EXISTS recommendations (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+  type TEXT NOT NULL,
+  key TEXT NOT NULL,
+  severity TEXT NOT NULL DEFAULT 'medium' CHECK (severity IN ('high','medium','low')),
+  title TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  action_json TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','approved','auto_applied','dismissed','resolved','failed')),
+  result TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_recommendations_user ON recommendations (user_id, status, key);
+
+-- Which recommendation types the user lets the platform apply on its own (default: none).
+CREATE TABLE IF NOT EXISTS automation_permissions (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type TEXT NOT NULL,
+  auto INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (user_id, type)
+);
 `;
 
 // Columns added after the first release. ALTER TABLE keeps existing databases (e.g. on a

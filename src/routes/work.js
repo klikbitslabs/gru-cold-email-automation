@@ -5,11 +5,12 @@ import { nowIso } from '../db.js';
 import { checkDraft } from '../lib/quality.js';
 import { requireAuth } from '../middleware/auth.js';
 import { abRecommendations } from '../lib/ab.js';
+import { abGroups, approveDrafts, generateForStep } from '../services/decisions.js';
 import { nextAction } from '../lib/leads.js';
 import { LAWFUL_BASES } from '../lib/validate.js';
 import { analyzeProspect } from '../services/jev.js';
 import { generateVariants } from '../services/openai.js';
-import { advanceProspect, analyzeAndClassify, loadSequence, performanceStats, setOutcome } from '../services/scheduler.js';
+import { advanceProspect, analyzeAndClassify, loadSequence, setOutcome } from '../services/scheduler.js';
 import { openaiConfigured } from '../services/settings.js';
 
 const OUTCOMES = ['interested', 'meeting', 'opportunity', 'won', 'lost'];
@@ -102,17 +103,7 @@ export function workRoutes(db, { now = () => new Date(), analyzeFn = analyzePros
   router.post('/campaigns/:id/drafts/approve-all', auth, (req, res) => {
     const campaign = db.prepare('SELECT id FROM campaigns WHERE id = ? AND user_id = ?').get(Number(req.params.id), req.user.id);
     if (!campaign) return res.status(404).json({ error: 'Campaña no encontrada' });
-    const pending = db.prepare("SELECT * FROM drafts WHERE campaign_id = ? AND status = 'pending'").all(campaign.id);
-    const at = now();
-    let approved = 0;
-    db.transaction(() => {
-      for (const d of pending) {
-        if (JSON.parse(d.quality_json || '{}').errors) continue;
-        approve(d, at);
-        approved += 1;
-      }
-    })();
-    res.json({ approved, skipped_with_errors: pending.length - approved });
+    res.json(approveDrafts(db, campaign.id, now()));
   });
 
   // ---------------------------------------------------------------------------
@@ -284,66 +275,16 @@ export function workRoutes(db, { now = () => new Date(), analyzeFn = analyzePros
       count: z.number().int().min(1).max(3).default(2),
       base_variant_id: z.number().int().optional(),
     }).parse(req.body);
-    const step = loadSequence(db, campaign.id).find((st) => st.step_number === input.step_number);
-    if (!step) return res.status(404).json({ error: 'Paso no encontrado' });
-    const brand = campaign.brand_id ? db.prepare('SELECT * FROM brands WHERE id = ?').get(campaign.brand_id) : null;
-    if (!brand) return res.status(400).json({ error: 'Asigna una marca a la campaña: la IA escribe con su contexto.' });
-    const segment = input.segment ? db.prepare('SELECT * FROM segments WHERE campaign_id = ? AND name = ?').get(campaign.id, input.segment) : null;
-
-    const perf = performanceStats(db, campaign.id).variants;
-    const opened = new Map(db.prepare('SELECT variant_id AS id, SUM(open_count > 0) AS n FROM messages WHERE campaign_id = ? GROUP BY variant_id').all(campaign.id).map((r) => [r.id, r.n]));
-    const rate = (n, d) => (d ? Math.round((n / d) * 1000) / 10 : null);
-    const performance = step.variants
-      .filter((v) => v.status !== 'proposed' && (!segment || !v.segment_id || v.segment_id === segment.id))
-      .filter((v) => !input.base_variant_id || v.id === input.base_variant_id || (perf.get(v.id)?.sent || 0) > 0)
-      .map((v) => {
-        const st = perf.get(v.id) || { sent: 0, replied: 0 };
-        return { subject: v.subject, body: v.body, sent: st.sent, open_rate: rate(opened.get(v.id) || 0, st.sent), reply_rate: rate(st.replied, st.sent) };
-      });
-    const sample = db.prepare('SELECT fields_json FROM prospects WHERE campaign_id = ? LIMIT 1').get(campaign.id);
-    const result = await generateFn({
-      brand,
-      campaign,
-      segment,
-      stepNumber: step.step_number,
-      channel: step.channel,
-      sameThread: Boolean(step.same_thread),
-      count: input.count,
-      performance,
-      fields: Object.keys(JSON.parse(sample?.fields_json || '{}')).slice(0, 15),
+    const result = await generateForStep(db, {
+      campaign, stepNumber: input.step_number, segmentName: input.segment, count: input.count, baseVariantId: input.base_variant_id, generateFn,
     });
-    const created = [];
-    db.transaction(() => {
-      for (const v of result.variants) {
-        const id = Number(db.prepare(
-          "INSERT INTO variants (step_id, label, angle, segment_id, subject, body, status, origin, rationale) VALUES (?, ?, ?, ?, ?, ?, 'proposed', 'ai', ?)",
-        ).run(step.id, `IA · ${v.label}`.slice(0, 60), v.angle, segment?.id ?? null, v.subject, v.body, v.rationale).lastInsertRowid);
-        created.push({ id, ...v });
-      }
-    })();
-    res.status(201).json({ model: result.model, variants: created });
+    res.status(201).json(result);
   });
 
   router.get('/campaigns/:id/ab', auth, (req, res) => {
     const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ? AND user_id = ?').get(Number(req.params.id), req.user.id);
     if (!campaign) return res.status(404).json({ error: 'Campaña no encontrada' });
-    const perf = performanceStats(db, campaign.id).variants;
-    const opened = new Map(db.prepare('SELECT variant_id AS id, SUM(open_count > 0) AS n FROM messages WHERE campaign_id = ? GROUP BY variant_id').all(campaign.id).map((r) => [r.id, r.n]));
-    const rows = db.prepare(
-      `SELECT v.*, s.step_number, sg.name AS segment FROM variants v JOIN steps s ON s.id = v.step_id LEFT JOIN segments sg ON sg.id = v.segment_id
-       WHERE s.campaign_id = ? AND s.channel = 'email' ORDER BY s.step_number, v.id`,
-    ).all(campaign.id);
-    const groups = new Map();
-    for (const v of rows) {
-      const key = `${v.step_number}|${v.segment || ''}`;
-      if (!groups.has(key)) groups.set(key, { step_number: v.step_number, segment: v.segment || '', variants: [] });
-      const st = perf.get(v.id) || { sent: 0, replied: 0, positive: 0 };
-      groups.get(key).variants.push({
-        id: v.id, label: v.label, status: v.status, origin: v.origin, rationale: v.rationale, subject: v.subject, body: v.body,
-        sent: st.sent, replied: st.replied, positive: st.positive, opened: opened.get(v.id) || 0,
-      });
-    }
-    const list = [...groups.values()];
+    const list = abGroups(db, campaign.id);
     res.json({ groups: list, recommendations: abRecommendations(list), openai: openaiConfigured() });
   });
 

@@ -15,7 +15,9 @@ import { checkDraft } from '../lib/quality.js';
 import { allFieldsPresent, buildEmailBody, prospectVariables, renderTemplate, templateFields } from '../lib/template.js';
 import { addDays, inSendWindow, localParts, nextLocalSlot } from '../lib/time.js';
 import { extractEmail, gmailForRefreshToken } from './google.js';
+import { runDecisions } from './decisions.js';
 import { analyzeProspect, classifyReply, decide, slotForMinute, slotRanges } from './jev.js';
+import { generateVariants } from './openai.js';
 
 const DAY_MS = 86400000;
 // Only credential problems disable a sender; 403/429 rate limits are retried on the next tick.
@@ -232,6 +234,8 @@ export function createScheduler({
   decideFn = decide,
   analyzeFn = analyzeProspect,
   classifyFn = classifyReply,
+  generateFn = generateVariants,
+  decisionsEveryMinutes = 60,
   now = () => new Date(),
   log = console,
   random = Math.random,
@@ -655,12 +659,19 @@ export function createScheduler({
   }
 
   let running = false;
+  let lastDecisions = null;
   async function tick() {
     if (running) return { skipped: true };
     running = true;
     try {
       await checkReplies();
       const analyzed = await analyzeLeads();
+      // Decision center: refresh recommendations and auto-apply the permitted ones (hourly).
+      const at = now();
+      if (!lastDecisions || at - lastDecisions >= decisionsEveryMinutes * 60000) {
+        lastDecisions = at;
+        await runDecisions(db, { generateFn, now, log }).catch((err) => log.error?.('[scheduler] decisions failed', err));
+      }
       const usedSenders = new Set();
       let sent = 0;
       for (const campaign of stmts.activeCampaigns.all()) {

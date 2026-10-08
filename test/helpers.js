@@ -43,7 +43,7 @@ export function decodeBodies(mime) {
 /** MX checker double: every domain receives mail except the ones listed. */
 export const fakeMx = (deadDomains = []) => async (domain) => (deadDomains.includes(domain) ? 'none' : 'ok');
 
-export function setup({ decideFn, analyzeFn, classifyFn, deadDomains = [], start = '2026-10-07T15:00:00Z' } = {}) {
+export function setup({ decideFn, analyzeFn, classifyFn, generateFn, deadDomains = [], start = '2026-10-07T15:00:00Z' } = {}) {
   const db = openDatabase(':memory:');
   const gmail = fakeGmail();
   const clock = { now: new Date(start) };
@@ -57,8 +57,9 @@ export function setup({ decideFn, analyzeFn, classifyFn, deadDomains = [], start
     ...(decideFn ? { decideFn } : {}),
     ...(analyzeFn ? { analyzeFn } : {}),
     ...(classifyFn ? { classifyFn } : {}),
+    ...(generateFn ? { generateFn } : {}),
   });
-  const app = createApp({ db, scheduler, gmailFor: () => gmail.api, now, decideFn, analyzeFn, mx: fakeMx(deadDomains) });
+  const app = createApp({ db, scheduler, gmailFor: () => gmail.api, now, decideFn, analyzeFn, generateFn, mx: fakeMx(deadDomains) });
   return { db, app, gmail, clock, scheduler };
 }
 

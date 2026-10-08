@@ -88,6 +88,8 @@ const routes = [
   [/^#\/brands/, viewBrands],
   [/^#\/companies/, viewCompanies],
   [/^#\/guide$/, viewGuide],
+  [/^#\/analytics/, viewAnalytics],
+  [/^#\/decisions$/, viewDecisions],
 ];
 
 async function router() {
@@ -108,6 +110,7 @@ async function router() {
     jev.textContent = meta.jev_configured ? `Jev activo · ${meta.jev_model}` : 'Jev sin API key · reglas';
     jev.className = `badge ${meta.jev_configured ? 'ok' : 'warn'}`;
     jev.title = meta.jev_configured ? 'Las decisiones usan TypeSafe Jev' : 'Carga la API key de Jev en Integraciones';
+    refreshDecisionCount();
   }
   const path = hash.split('?')[0];
   for (const [re, view] of routes) {
@@ -1329,6 +1332,309 @@ function viewGuide() {
       <li>⛔ <b>Error</b>: bloquea el envío hasta que una persona edite o confirme.</li>
       <li>⚠️ <b>Advertencia</b>: el correo va a la cola de aprobación (según el modo de la campaña).</li>
       <li>ℹ️ <b>Info</b>: sugerencia, no detiene nada.</li></ul></div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Advanced analytics
+// ---------------------------------------------------------------------------
+const VIEWER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+const PERIODS = [[7, '7 días'], [30, '30 días'], [90, '90 días']];
+// Fixed series order (color follows the metric, never its rank).
+const SERIES = [['sent', 'Enviados', 1], ['opened', 'Aperturas', 2], ['replied', 'Respuestas', 3]];
+const WEEKDAY_SHORT = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+const fmtPct = (v) => (v === null || v === undefined ? '—' : `${v}%`);
+const fmtNum = (v) => Number(v || 0).toLocaleString('es');
+const fmtDay = (d) => new Date(`${d}T12:00:00Z`).toLocaleDateString('es', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+
+async function refreshDecisionCount() {
+  try {
+    const { open } = await api('/decisions/count');
+    const el = $('#decisions-count');
+    el.textContent = open;
+    el.hidden = !open;
+  } catch { /* not logged in */ }
+}
+
+/** KPI tile with the change vs. the previous period of the same length. */
+function kpiTile(label, value, prev, { rate = false, goodWhenUp = true, sub = '' } = {}) {
+  let delta = '<span class="delta">sin datos previos</span>';
+  if (prev !== null && prev !== undefined && value !== null && value !== undefined) {
+    const diff = Math.round((value - prev) * 10) / 10;
+    if (diff === 0) delta = '<span class="delta">= periodo anterior</span>';
+    else {
+      const good = diff > 0 === goodWhenUp;
+      delta = `<span class="delta ${good ? 'good' : 'bad'}">${diff > 0 ? '▲' : '▼'} ${Math.abs(diff)}${rate ? ' pp' : ''} <span class="muted">vs anterior</span></span>`;
+    }
+  }
+  return `<div class="stat kpi"><span>${esc(label)}</span><b>${rate ? fmtPct(value) : fmtNum(value)}</b>${sub ? `<span class="small">${sub}</span>` : ''}${delta}</div>`;
+}
+
+/** Line chart (one y-axis, counts) with crosshair tooltip, legend, end labels and a table view. */
+function lineChart(el, rows, series) {
+  const width = Math.max(320, el.clientWidth);
+  const height = 240;
+  const m = { top: 12, right: 92, bottom: 26, left: 40 };
+  const w = width - m.left - m.right;
+  const h = height - m.top - m.bottom;
+  const max = Math.max(1, ...rows.flatMap((r) => series.map(([k]) => r[k])));
+  const step = 10 ** Math.floor(Math.log10(max));
+  const top = Math.ceil(max / step) * step;
+  const x = (i) => m.left + (rows.length <= 1 ? w / 2 : (i / (rows.length - 1)) * w);
+  const y = (v) => m.top + h - (v / top) * h;
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => Math.round(top * t));
+  const every = Math.max(1, Math.ceil(rows.length / Math.max(2, Math.floor(w / 70))));
+  // End labels, nudged apart so they never overlap.
+  const ends = series.map(([k, label, slot]) => ({ label, slot, y: y(rows.at(-1)?.[k] || 0) })).sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i += 1) ends[i].y = Math.max(ends[i].y, ends[i - 1].y + 13);
+  el.innerHTML = `
+    <svg class="chart" width="${width}" height="${height}" role="img" aria-label="Envíos, aperturas y respuestas por día">
+      ${ticks.map((t) => `<line class="grid" x1="${m.left}" x2="${m.left + w}" y1="${y(t)}" y2="${y(t)}"/><text class="axis" x="${m.left - 6}" y="${y(t) + 4}" text-anchor="end">${fmtNum(t)}</text>`).join('')}
+      ${rows.map((r, i) => (i % every === 0 ? `<text class="axis" x="${x(i)}" y="${height - 6}" text-anchor="middle">${esc(fmtDay(r.date))}</text>` : '')).join('')}
+      ${series.map(([k, , slot]) => `<polyline class="line s${slot}" points="${rows.map((r, i) => `${x(i)},${y(r[k])}`).join(' ')}"/>`).join('')}
+      ${ends.map((e) => `<text class="end-label" x="${m.left + w + 8}" y="${e.y + 4}"><tspan class="dot s${e.slot}">●</tspan> ${esc(e.label)}</text>`).join('')}
+      <line class="crosshair" y1="${m.top}" y2="${m.top + h}" hidden/>
+      ${series.map(([, , slot]) => `<circle class="marker s${slot}" r="4" hidden/>`).join('')}
+      <rect class="hit" x="${m.left}" y="${m.top}" width="${w}" height="${h}"/>
+    </svg>
+    <div class="chart-tip" hidden></div>`;
+  const svg = $('svg', el);
+  const tip = $('.chart-tip', el);
+  const cross = $('.crosshair', el);
+  const markers = $$('circle.marker', el);
+  const hide = () => { tip.hidden = true; cross.setAttribute('hidden', ''); markers.forEach((c) => c.setAttribute('hidden', '')); };
+  $('.hit', el).addEventListener('mousemove', (ev) => {
+    const box = svg.getBoundingClientRect();
+    const px = ev.clientX - box.left;
+    const i = Math.max(0, Math.min(rows.length - 1, Math.round(((px - m.left) / w) * (rows.length - 1))));
+    const r = rows[i];
+    cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i)); cross.removeAttribute('hidden');
+    series.forEach(([k], j) => { markers[j].setAttribute('cx', x(i)); markers[j].setAttribute('cy', y(r[k])); markers[j].removeAttribute('hidden'); });
+    tip.innerHTML = `<b>${esc(fmtDay(r.date))}</b>${series.map(([k, label, slot]) => `<div><span class="dot s${slot}">●</span> ${esc(label)} <b>${fmtNum(r[k])}</b></div>`).join('')}`;
+    tip.hidden = false;
+    const left = x(i) + 12 + tip.offsetWidth > width ? x(i) - tip.offsetWidth - 12 : x(i) + 12;
+    tip.style.left = `${left}px`;
+    tip.style.top = `${m.top}px`;
+  });
+  $('.hit', el).addEventListener('mouseleave', hide);
+}
+
+function dataTable(head, rows) {
+  return `<div class="table-wrap"><table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${head.length}" class="empty">Sin datos en el periodo</td></tr>`}</tbody></table></div>`;
+}
+
+/** Weekday × hour heatmap of human opens (sequential blue ramp). */
+function heatmapHtml(matrix) {
+  const max = Math.max(0, ...matrix.flat());
+  const level = (n) => (n === 0 ? 'e' : Math.min(6, Math.ceil((n / max) * 7) - 1));
+  const hours = Array.from({ length: 24 }, (_, hr) => hr);
+  return `<div class="heatmap" role="table" aria-label="Aperturas por día y hora">
+      <div></div>${hours.map((hr) => `<div class="hm-hour">${hr % 3 === 0 ? `${hr}h` : ''}</div>`).join('')}
+      ${matrix.map((row, d) => `<div class="hm-day">${WEEKDAY_SHORT[d]}</div>${row.map((n, hr) => `<div class="hm-cell q${level(n)}" data-tip="${WEEKDAY_SHORT[d]} ${String(hr).padStart(2, '0')}:00 · ${n} apertura(s)"></div>`).join('')}`).join('')}
+    </div>
+    <div class="row small muted hm-legend">Menos ${[0, 1, 2, 3, 4, 5, 6].map((q) => `<span class="hm-cell q${q}"></span>`).join('')} Más</div>`;
+}
+
+const BREAKDOWNS = [
+  ['by_campaign', 'Campaña', (r) => `<a href="#/campaigns/${r.id}/results">${esc(r.name)}</a>`],
+  ['by_step', 'Paso', (r) => `Paso ${r.step_number}${r.step_number === 1 ? ' · primer correo' : ' · seguimiento'}`],
+  ['by_subject', 'Asunto / variante', (r) => `<b>${esc(r.label || 'Sin variante')}</b>${r.variant_step ? ` <span class="small muted">paso ${r.variant_step}</span>` : ''}<br><span class="small muted">${esc(r.subject || '(mismo hilo)')}</span>`],
+  ['by_sender', 'Sender', (r) => esc(r.sender || '—')],
+  ['by_segment', 'Segmento', (r) => esc(r.segment)],
+  ['by_industry', 'Industria', (r) => esc(r.industry)],
+  ['by_title', 'Cargo', (r) => esc(r.title)],
+];
+
+const rateBar = (v, max = 100) => `<div class="ratecell"><span>${fmtPct(v)}</span><div class="ratebar"><div style="width:${v === null ? 0 : Math.min(100, (v / max) * 100)}%"></div></div></div>`;
+
+function breakdownTable(key, rows) {
+  const [, label, cell] = BREAKDOWNS.find(([k]) => k === key);
+  return dataTable([label, 'Enviados', 'Apertura', 'Respuesta', 'Positivas', 'Rebote'], rows.map((r) => [
+    cell(r), fmtNum(r.sent), rateBar(r.open_rate), rateBar(r.reply_rate, 30), fmtNum(r.positive), `<span class="${r.bounce_rate > 3 ? 'text-bad' : ''}">${fmtPct(r.bounce_rate)}</span>`,
+  ]));
+}
+
+async function viewAnalytics() {
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  const filters = { days: Number(params.get('days') || 30), campaign_id: params.get('campaign_id') || '', brand_id: params.get('brand_id') || '' };
+  const q = new URLSearchParams({ days: filters.days, tz: VIEWER_TZ });
+  if (filters.campaign_id) q.set('campaign_id', filters.campaign_id);
+  if (filters.brand_id) q.set('brand_id', filters.brand_id);
+  const [a, { campaigns }, { brands }, decisions] = await Promise.all([api(`/analytics?${q}`), api('/campaigns'), api('/brands'), api('/decisions')]);
+  const k = a.kpis;
+  const p = a.previous;
+  const best = a.heatmap.flatMap((row, d) => row.map((n, hr) => ({ d, hr, n }))).filter((c) => c.n).sort((x, y) => y.n - x.n).slice(0, 3);
+  const totalReplies = a.replies_by_category.reduce((s, r) => s + r.n, 0);
+  const leads = { ready: 0, research: 0, excluded: 0 };
+  for (const r of a.pipeline) leads[r.lead_status] = (leads[r.lead_status] || 0) + r.n;
+
+  app.innerHTML = `
+    <div class="row between"><div><h1>Analítica</h1><p class="muted">Resultados de tus envíos: aperturas, respuestas, cuándo abren tus prospectos y qué asuntos, segmentos y senders funcionan mejor.</p></div></div>
+    <div class="card filters row">
+      <div class="seg" role="group" aria-label="Periodo">${PERIODS.map(([d, l]) => `<button class="${filters.days === d ? 'active' : ''}" data-days="${d}">${l}</button>`).join('')}</div>
+      <select id="f-brand" aria-label="Marca"><option value="">Todas las marcas</option>${brands.map((b) => `<option value="${b.id}" ${String(b.id) === filters.brand_id ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}</select>
+      <select id="f-campaign" aria-label="Campaña"><option value="">Todas las campañas</option>${campaigns.map((c) => `<option value="${c.id}" ${String(c.id) === filters.campaign_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      <span class="small muted">Fechas en ${esc(VIEWER_TZ)}</span>
+    </div>
+    ${decisions.open.length ? `<div class="notice info decision-strip"><b>${decisions.open.length} recomendación(es) para mejorar tus resultados</b>
+      <ul>${decisions.open.slice(0, 3).map((r) => `<li>${severityIcon(r.severity)} ${esc(r.title)}</li>`).join('')}</ul><a href="#/decisions">Revisar y aprobar en Decisiones →</a></div>` : ''}
+    <div class="grid4 kpis">
+      ${kpiTile('Enviados', k.sent, p.sent, { sub: `${fmtNum(k.contacted)} personas contactadas` })}
+      ${kpiTile('Tasa de apertura', k.open_rate, p.open_rate, { rate: true, sub: `${fmtNum(k.opened)} correos abiertos · ${fmtNum(k.opens_total)} aperturas` })}
+      ${kpiTile('Tasa de respuesta', k.reply_rate, p.reply_rate, { rate: true, sub: `${fmtNum(k.replied)} respuestas` })}
+      ${kpiTile('Respuestas positivas', k.positive_rate, p.positive_rate, { rate: true, sub: `${fmtNum(k.positive)} interesados o referidos` })}
+      ${kpiTile('Reuniones', k.meetings, p.meetings, { sub: `${fmtPct(k.meeting_rate)} de contactados · ${fmtNum(k.won)} cierres` })}
+      ${kpiTile('Rebote', k.bounce_rate, p.bounce_rate, { rate: true, goodWhenUp: false, sub: `${fmtNum(k.bounced)} rebotes · sano < 3%` })}
+      ${kpiTile('Bajas', k.unsubscribe_rate, p.unsubscribe_rate, { rate: true, goodWhenUp: false, sub: `${fmtNum(k.unsubscribed)} personas` })}
+      <div class="stat kpi"><span>Tiempo hasta abrir / responder</span><b>${a.timing.median_hours_to_open ?? '—'} h · ${a.timing.median_hours_to_reply ?? '—'} h</b><span class="small">mediana desde el envío</span></div>
+    </div>
+    <div class="card">
+      <div class="row between"><h2>Actividad diaria</h2><button class="btn ghost small" id="toggle-daily">Ver tabla</button></div>
+      <div class="legend">${SERIES.map(([, l, slot]) => `<span><i class="sw s${slot}"></i>${l}</span>`).join('')}</div>
+      <div id="daily-chart" class="chart-wrap"></div>
+      <div id="daily-table" hidden>${dataTable(['Día', 'Enviados', 'Aperturas (1ª)', 'Respuestas'], a.daily.map((r) => [esc(fmtDay(r.date)), fmtNum(r.sent), fmtNum(r.opened), fmtNum(r.replied)]))}</div>
+    </div>
+    <div class="grid-analytics">
+      <div class="card">
+        <h2>¿Cuándo abren tus prospectos?</h2>
+        <p class="small muted">Aperturas humanas (sin escáneres de seguridad) por día y hora, en la zona horaria de cada campaña.</p>
+        ${heatmapHtml(a.heatmap)}
+        <p class="small">${best.length ? `Mejores momentos: ${best.map((c) => `<b>${WEEKDAY_SHORT[c.d]} ${String(c.hr).padStart(2, '0')}:00</b> (${c.n})`).join(', ')}. Decisiones te propone ajustar la ventana de envío cuando hay suficientes datos.` : 'Aún no hay aperturas en el periodo.'}</p>
+        <div class="chart-tip" id="hm-tip" hidden></div>
+      </div>
+      <div class="card">
+        <h2>Respuestas por tipo</h2>
+        ${a.replies_by_category.map((r) => `<div class="funnel-row"><span>${esc(REPLY_LABEL[r.category] || r.category)}</span><div class="funnel-bar"><div style="width:${Math.max(2, (r.n / Math.max(1, totalReplies)) * 100)}%"></div></div><b>${r.n}</b></div>`).join('') || '<p class="muted">Sin respuestas en el periodo.</p>'}
+        <h3 style="margin-top:16px">Leads en tus campañas</h3>
+        <div class="row">${leadBadge('ready')} <b>${fmtNum(leads.ready)}</b> ${leadBadge('research')} <b>${fmtNum(leads.research)}</b> ${leadBadge('excluded')} <b>${fmtNum(leads.excluded)}</b></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>¿Qué funciona mejor?</h2>
+      <p class="small muted">Respuestas atribuidas al último correo que recibió cada persona. Apertura sobre enviados.</p>
+      <div class="tabs" id="bd-tabs">${BREAKDOWNS.map(([key, label], i) => `<button data-bd="${key}" class="${i === 2 ? 'active' : ''}">${label}</button>`).join('')}</div>
+      <div id="bd-table">${breakdownTable('by_subject', a.by_subject)}</div>
+    </div>`;
+
+  const go = (changes) => {
+    const next = { ...filters, ...changes };
+    const qs = new URLSearchParams(Object.entries(next).filter(([, v]) => v !== '' && v !== null));
+    location.hash = `#/analytics?${qs}`;
+  };
+  $$('[data-days]').forEach((b) => b.addEventListener('click', () => go({ days: Number(b.dataset.days) })));
+  $('#f-brand').addEventListener('change', (e) => go({ brand_id: e.target.value }));
+  $('#f-campaign').addEventListener('change', (e) => go({ campaign_id: e.target.value }));
+  lineChart($('#daily-chart'), a.daily, SERIES);
+  $('#toggle-daily').addEventListener('click', (e) => {
+    const table = $('#daily-table');
+    table.hidden = !table.hidden;
+    $('#daily-chart').hidden = !table.hidden;
+    e.target.textContent = table.hidden ? 'Ver tabla' : 'Ver gráfico';
+  });
+  $$('[data-bd]').forEach((b) => b.addEventListener('click', () => {
+    $$('[data-bd]').forEach((x) => x.classList.toggle('active', x === b));
+    $('#bd-table').innerHTML = breakdownTable(b.dataset.bd, a[b.dataset.bd]);
+  }));
+  const hmTip = $('#hm-tip');
+  $$('.heatmap .hm-cell').forEach((cell) => {
+    cell.addEventListener('mouseenter', () => {
+      const card = cell.closest('.card').getBoundingClientRect();
+      const box = cell.getBoundingClientRect();
+      hmTip.textContent = cell.dataset.tip;
+      hmTip.hidden = false;
+      hmTip.style.left = `${Math.min(box.left - card.left, card.width - hmTip.offsetWidth - 8)}px`;
+      hmTip.style.top = `${box.top - card.top - hmTip.offsetHeight - 6}px`;
+    });
+    cell.addEventListener('mouseleave', () => { hmTip.hidden = true; });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Decision center
+// ---------------------------------------------------------------------------
+const SEVERITY = { high: ['Alta', 'bad', '⛔'], medium: ['Media', 'warn', '⚠️'], low: ['Baja', '', 'ℹ️'] };
+const severityIcon = (s) => SEVERITY[s]?.[2] || 'ℹ️';
+const REC_STATUS = { approved: ['Aprobada', 'ok'], auto_applied: ['Automática', 'ok'], dismissed: ['Descartada', ''], resolved: ['Resuelta sola', ''], failed: ['Falló', 'bad'] };
+const PRESET_LABEL = { supervised: ['Supervisado', 'Todo espera tu aprobación.'], recommended: ['Recomendado', 'Automatiza lo que protege resultados; tú apruebas envíos y textos.'], autopilot: ['Autopiloto', 'La plataforma aplica todo lo que pasa los controles.'] };
+
+function evidenceHtml(r) {
+  const e = r.evidence || {};
+  if (r.type === 'adjust_schedule' && e.hourly) {
+    const max = Math.max(1, ...e.hourly);
+    return `<div class="mini-bars" aria-label="Aperturas por hora">${e.hourly.map((n, hr) => `<div title="${hr}:00 · ${n} aperturas"><i style="height:${(n / max) * 100}%"></i>${hr % 3 === 0 ? `<span>${hr}</span>` : ''}</div>`).join('')}</div>
+      <p class="small muted">Cobertura de aperturas: actual ${e.current_coverage}% → propuesta ${e.proposed_coverage}% (${e.opens} aperturas).</p>`;
+  }
+  if (r.type === 'activate_variants' && e.variants) {
+    return `<ul class="small">${e.variants.map((v) => `<li>${v.ok ? '✅' : '⛔'} Paso ${v.step_number} · <b>${esc(v.label)}</b>${v.subject ? ` — “${esc(v.subject)}”` : ''}</li>`).join('')}</ul>`;
+  }
+  return '';
+}
+
+async function viewDecisions() {
+  const d = await api('/decisions');
+  const autoOn = Object.entries(d.permissions).filter(([, v]) => v).length;
+  const presetActive = Object.entries(d.presets).find(([, types]) => Object.keys(d.permissions).every((t) => d.permissions[t] === types.includes(t)))?.[0];
+  const typeLabel = (t) => d.types[t]?.label || 'Aviso';
+  app.innerHTML = `
+    <div class="row between"><div><h1>Decisiones</h1><p class="muted">La plataforma revisa tus resultados cada hora y propone qué cambiar: textos, variantes, senders, ventanas y límites. Tú apruebas — o das permiso para que lo haga sola.</p></div>
+      <button class="btn" id="dec-refresh">Analizar ahora</button></div>
+    <div class="card">
+      <div class="row between"><h2>Permisos de automatización</h2><span class="badge ${autoOn ? 'ok' : ''}">${autoOn ? `${autoOn} automática(s)` : 'Todo supervisado'}</span></div>
+      <div class="presets">${Object.keys(d.presets).map((key) => `<button class="preset ${presetActive === key ? 'active' : ''}" data-preset="${key}"><b>${PRESET_LABEL[key][0]}</b><span>${PRESET_LABEL[key][1]}</span></button>`).join('')}</div>
+      <div class="perm-list">${Object.entries(d.types).map(([t, info]) => `
+        <label class="perm"><input type="checkbox" data-perm="${t}" ${d.permissions[t] ? 'checked' : ''}>
+          <span><b>${esc(info.label)}</b><br><span class="small muted">${esc(info.help)}</span></span></label>`).join('')}</div>
+      <p class="small muted">Siempre requieren a una persona: borradores con errores de calidad, variantes propuestas con errores y cualquier cambio informativo. Todo lo automático queda en el historial.</p>
+    </div>
+    <h2>Pendientes (${d.open.length})</h2>
+    ${d.open.map((r) => {
+      const [sevLabel, sevClass] = SEVERITY[r.severity] || SEVERITY.low;
+      return `<div class="card rec sev-${r.severity}">
+        <div class="row between"><div class="row"><span class="badge ${sevClass}">${severityIcon(r.severity)} ${sevLabel}</span><span class="badge">${esc(typeLabel(r.type))}</span>${r.campaign ? `<a class="small" href="#/campaigns/${r.campaign_id}">${esc(r.campaign)}</a>` : ''}</div>
+          <span class="small muted">${fmtDate(r.created_at)}</span></div>
+        <h3>${esc(r.title)}</h3>
+        <p>${esc(r.reason)}</p>
+        ${evidenceHtml(r)}
+        <div class="row">
+          ${r.action ? `<button class="btn ok small" data-approve="${r.id}">Aprobar y aplicar</button>` : '<span class="small muted">Informativa: requiere una acción tuya fuera de esta pantalla.</span>'}
+          <button class="btn ghost small" data-dismiss="${r.id}">Descartar</button>
+          ${r.action && d.permissions[r.type] ? '<span class="small muted">Tienes permiso automático: se aplicará en el próximo ciclo.</span>' : ''}
+        </div>
+      </div>`;
+    }).join('') || '<div class="card empty">No hay recomendaciones pendientes. La plataforma seguirá revisando tus resultados cada hora.</div>'}
+    <div class="card"><h2>Historial</h2>
+      ${dataTable(['Fecha', 'Recomendación', 'Estado', 'Resultado'], d.history.map((r) => {
+        const [label, cls] = REC_STATUS[r.status] || [r.status, ''];
+        return [`<span class="small">${fmtDate(r.decided_at)}</span>`, `${esc(r.title)}<br><span class="small muted">${esc(typeLabel(r.type))}</span>`, `<span class="badge ${cls}">${label}</span>`, `<span class="small">${esc(r.result || '—')}</span>`];
+      }))}
+    </div>`;
+
+  const reload = () => { viewDecisions(); refreshDecisionCount(); };
+  $('#dec-refresh').addEventListener('click', (e) => guard(e.target, async () => {
+    const s = await api('/decisions/refresh', { method: 'POST' });
+    toast(`${s.open} pendiente(s)${s.auto_applied ? ` · ${s.auto_applied} aplicada(s) automáticamente` : ''}${s.failed ? ` · ${s.failed} con error` : ''}`);
+    reload();
+  }));
+  $$('[data-perm]').forEach((cb) => cb.addEventListener('change', () => guard(cb, async () => {
+    await api('/decisions/permissions', { method: 'PUT', body: { [cb.dataset.perm]: cb.checked } });
+    toast(cb.checked ? 'Permiso automático activado' : 'Ahora requiere tu aprobación');
+    reload();
+  })));
+  $$('[data-preset]').forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+    const enabled = d.presets[b.dataset.preset];
+    await api('/decisions/permissions', { method: 'PUT', body: Object.fromEntries(Object.keys(d.types).map((t) => [t, enabled.includes(t)])) });
+    toast(`Modo ${PRESET_LABEL[b.dataset.preset][0]} activado`);
+    reload();
+  })));
+  $$('[data-approve]').forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+    const r = await api(`/decisions/${b.dataset.approve}/approve`, { method: 'POST' });
+    toast(r.result);
+    reload();
+  })));
+  $$('[data-dismiss]').forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+    await api(`/decisions/${b.dataset.dismiss}/dismiss`, { method: 'POST' });
+    reload();
+  })));
 }
 
 // ---------------------------------------------------------------------------
