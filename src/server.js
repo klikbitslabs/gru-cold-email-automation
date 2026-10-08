@@ -1,5 +1,6 @@
 import { createApp } from './app.js';
-import { config, googleConfigured, jevConfigured } from './config.js';
+import { config } from './config.js';
+import { googleConfigured, integrations, jevConfigured } from './services/settings.js';
 import { openDatabase } from './db.js';
 import { createScheduler } from './services/scheduler.js';
 
@@ -9,8 +10,8 @@ const app = createApp({ db, scheduler });
 
 app.listen(config.port, () => {
   console.log(`Outreach listo en ${config.baseUrl} (puerto ${config.port})`);
-  console.log(`  Google OAuth: ${googleConfigured() ? 'configurado' : 'FALTA GOOGLE_CLIENT_ID/SECRET'}`);
-  console.log(`  Jev (TypeSafe): ${jevConfigured() ? `activo (${config.typesafe.model})` : 'sin TYPESAFE_API_KEY → decisiones por reglas'}`);
+  console.log(`  Google OAuth: ${googleConfigured() ? 'configurado' : 'pendiente (configúralo en Integraciones)'}`);
+  console.log(`  Jev (TypeSafe): ${jevConfigured() ? `activo (${integrations.typesafe().model})` : 'sin API key → decisiones por reglas (configúralo en Integraciones)'}`);
   if (config.scheduler.enabled) {
     scheduler.start();
     console.log(`  Scheduler: cada ${config.scheduler.intervalSeconds}s`);

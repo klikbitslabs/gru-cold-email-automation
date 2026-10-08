@@ -83,22 +83,32 @@ Requisitos: Node.js ≥ 20.
 
 ```bash
 npm install
-cp .env.example .env   # completa JWT_SECRET, ENCRYPTION_KEY, GOOGLE_*, TYPESAFE_API_KEY
+cp .env.example .env   # completa JWT_SECRET y ENCRYPTION_KEY; el resto se carga en Integraciones
 npm start              # http://localhost:3000
-npm test               # 23 pruebas (auth, importación, validación, calidad, Jev, flujo completo)
+npm test               # 26 pruebas (auth, integraciones, importación, validación, calidad, Jev, flujo completo)
 ```
 
 Crea tu cuenta en `/#/register` y luego pon `ALLOW_REGISTRATION=false`.
 
-### 1. Cliente OAuth de Google (una vez)
+### 1. Claves desde el panel de Integraciones
 
+El primer usuario que se registra es el **administrador** y ve el menú **Integraciones**. Desde ahí se cargan las claves sin tocar el servidor:
+
+| Clave | Dónde | Notas |
+|---|---|---|
+| Google Client ID y Client Secret | Integraciones → Google Workspace | El panel muestra la **URI de redireccionamiento** y el **origen** exactos para copiarlos en Google Cloud; **Probar conexión** verifica las credenciales y la URI con Google. |
+| Dominios permitidos / cuentas @gmail.com | Integraciones → Google Workspace | Opcional. |
+| API key y modelo de Jev | Integraciones → Jev | **Probar conexión** hace una pregunta mínima a la API. |
+| `JWT_SECRET`, `ENCRYPTION_KEY` | Variables de Railway | **Solo aquí**: protegen las sesiones y cifran las claves del panel. No cambies `ENCRYPTION_KEY` después de guardar claves. |
+
+Las claves del panel se guardan cifradas (AES-256-GCM) y nunca se devuelven completas al navegador. Un valor del panel tiene prioridad sobre la variable de entorno del mismo nombre (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TYPESAFE_API_KEY`, `TYPESAFE_MODEL`, `ALLOWED_GOOGLE_DOMAINS`, `ALLOW_CONSUMER_GMAIL`), que siguen funcionando como alternativa.
+
+**Crear el cliente OAuth en Google Cloud (una vez):**
 1. En [Google Cloud Console](https://console.cloud.google.com/) crea un proyecto y **habilita la Gmail API**.
-2. **Pantalla de consentimiento OAuth**: tipo **Interno** si todos los senders son de tu organización de Workspace (no requiere verificación de Google). Scopes: `openid`, `email`, `profile`, `gmail.send`, `gmail.readonly`.
-3. **Credenciales → ID de cliente OAuth → Aplicación web**. URI de redirección autorizada: `{BASE_URL}/api/senders/google/callback` (p. ej. `https://outreach.tudominio.com/api/senders/google/callback`).
-4. Copia el ID y el secreto a `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
-5. En la app: **Senders → Conectar cuenta de Google Workspace**. La firma de Gmail se importa automáticamente.
-
-`gmail.readonly` se usa para detectar respuestas/rebotes y leer la firma. Si la pantalla es *Externa*, Google exige verificación para scopes restringidos.
+2. **Pantalla de consentimiento OAuth**: tipo **Interno** si todos los senders son de tu organización de Workspace (no requiere verificación). Scopes: `openid`, `email`, `profile`, `gmail.send`, `gmail.readonly`.
+3. **Credenciales → ID de cliente OAuth → Aplicación web**, con la URI y el origen que muestra el panel.
+4. Pega el Client ID y el Secret en **Integraciones**, guarda y pulsa **Probar conexión**.
+5. **Senders → Conectar cuenta de Google Workspace**. La firma de Gmail se importa automáticamente.
 
 ### 2. Dominio de envío
 
@@ -107,7 +117,7 @@ Crea tu cuenta en `/#/register` y luego pon `ALLOW_REGISTRATION=false`.
 
 ### 3. Jev
 
-Pide acceso en [typesafe.ai](https://typesafe.ai) y pon la clave en `TYPESAFE_API_KEY` (modelo por defecto `jev-latest`). El badge superior de la UI indica si Jev está activo.
+Pide acceso en [typesafe.ai](https://typesafe.ai) y carga la clave en **Integraciones** (modelo por defecto `jev-latest`). El indicador de la barra superior muestra si Jev está activo.
 
 ### 4. Deploy (Render o Railway)
 
@@ -115,14 +125,14 @@ La app necesita **un servidor siempre encendido** (el scheduler revisa cada 30 s
 
 **Render (recomendado)**
 1. En Render: **New → Blueprint** y elige este repositorio. Usa `render.yaml`: plan Starter, disco de 1 GB en `/data`, `JWT_SECRET` y `ENCRYPTION_KEY` generados automáticamente.
-2. Completa `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TYPESAFE_API_KEY` (y opcionalmente `ALLOWED_GOOGLE_DOMAINS`).
+2. Las claves de Google y Jev se cargan después en **Integraciones** (o como variables de entorno, si prefieres).
 3. La URL pública se detecta sola (`RENDER_EXTERNAL_URL`). Si usas dominio propio, define `BASE_URL=https://tu-dominio`.
 4. En Google Cloud agrega el redirect `https://<tu-app>.onrender.com/api/senders/google/callback`.
 
 **Railway**
 1. **New Project → Deploy from GitHub repo** (usa `Dockerfile` y `railway.json`).
 2. Agrega un **Volume** montado en `/data`.
-3. Variables: `JWT_SECRET` y `ENCRYPTION_KEY` (genera cada una con `openssl rand -hex 32`), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TYPESAFE_API_KEY`.
+3. Variables: solo `JWT_SECRET` y `ENCRYPTION_KEY` (genera cada una con `openssl rand -hex 32`). Las claves de Google y Jev se cargan después en **Integraciones**.
 4. **Settings → Networking → Generate Domain**. La URL se detecta sola (`RAILWAY_PUBLIC_DOMAIN`). Agrega el redirect de Google como arriba.
 
 Notas:

@@ -163,6 +163,15 @@ CREATE TABLE IF NOT EXISTS decisions (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
+-- Integration settings editable from the admin panel (API keys). Values are AES-256-GCM
+-- encrypted with ENCRYPTION_KEY; environment variables are the fallback.
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value_enc TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+
 -- Commercial segments (e.g. "Retail - Gerente comercial"). Jev assigns each prospect to one.
 CREATE TABLE IF NOT EXISTS segments (
   id INTEGER PRIMARY KEY,
@@ -224,6 +233,9 @@ CREATE TABLE IF NOT EXISTS tasks (
 // Columns added after the first release. ALTER TABLE keeps existing databases (e.g. on a
 // Railway volume) working without manual migrations.
 const ADDED_COLUMNS = {
+  users: {
+    is_admin: 'INTEGER NOT NULL DEFAULT 0',
+  },
   campaigns: {
     approval_mode: "TEXT NOT NULL DEFAULT 'first'",
   },
@@ -256,6 +268,10 @@ function migrate(db) {
     for (const [name, definition] of Object.entries(columns)) {
       if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
     }
+  }
+  // The first account is the administrator (manages integrations / API keys).
+  if (!db.prepare('SELECT 1 FROM users WHERE is_admin = 1').get()) {
+    db.exec('UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users)');
   }
 }
 

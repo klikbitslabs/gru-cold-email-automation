@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { googleConfigured } from '../config.js';
+import { googleConfigured } from '../services/settings.js';
 import { decrypt, encrypt } from '../lib/crypto.js';
 import { buildMime, formatAddress, toBase64Url } from '../lib/mime.js';
 import { buildEmailBody, sanitizeSignature } from '../lib/template.js';
@@ -63,7 +63,7 @@ export function senderRoutes(db, { gmailFor = (s) => gmailForRefreshToken(decryp
 
   router.get('/google/connect', (req, res) => {
     if (!googleConfigured()) {
-      return res.status(400).json({ error: 'Configura GOOGLE_CLIENT_ID y GOOGLE_CLIENT_SECRET en el servidor (ver README).' });
+      return res.status(400).json({ error: 'Falta configurar Google OAuth: un administrador debe cargar el Client ID y el Client Secret en Integraciones.' });
     }
     res.json({ url: getAuthUrl(signOAuthState(req.user.id), req.query.email ? String(req.query.email) : undefined) });
   });

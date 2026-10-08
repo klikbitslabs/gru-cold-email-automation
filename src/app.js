@@ -3,22 +3,25 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
-import { config, googleConfigured, jevConfigured } from './config.js';
+import { config } from './config.js';
 import { lintTemplate } from './lib/quality.js';
 import { LAWFUL_BASES } from './lib/validate.js';
 import { requireAuth } from './middleware/auth.js';
+import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
 import { campaignRoutes } from './routes/campaigns.js';
 import { senderRoutes } from './routes/senders.js';
 import { trackingRoutes } from './routes/tracking.js';
 import { workRoutes } from './routes/work.js';
+import { bindSettings, googleConfigured, integrations, jevConfigured } from './services/settings.js';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 /**
- * @param deps { db, scheduler?, gmailFor?, decideFn?, analyzeFn?, mx?, now? } — injectable for tests.
+ * @param deps { db, scheduler?, gmailFor?, decideFn?, analyzeFn?, mx?, now?, testJev?, testGoogle? } — injectable for tests.
  */
-export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, mx, now } = {}) {
+export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, mx, now, testJev, testGoogle } = {}) {
+  bindSettings(db);
   const inject = (deps) => Object.fromEntries(Object.entries(deps).filter(([, v]) => v !== undefined));
   const app = express();
   app.set('trust proxy', 1);
@@ -48,6 +51,7 @@ export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, mx, no
 
   app.use('/api', express.json({ limit: '1mb' }));
   app.use('/api/auth', authRoutes(db));
+  app.use('/api/admin', adminRoutes(db, inject({ testJev, testGoogle })));
   app.use('/api/senders', senderRoutes(db, gmailFor ? { gmailFor } : {}));
   app.use('/api/campaigns', campaignRoutes(db, inject({ decideFn, analyzeFn, now, mx })));
   app.use('/api', workRoutes(db, inject({ now })));
@@ -56,7 +60,7 @@ export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, mx, no
     res.json({
       google_configured: googleConfigured(),
       jev_configured: jevConfigured(),
-      jev_model: config.typesafe.model,
+      jev_model: integrations.typesafe().model,
       max_steps: config.sequence.maxSteps,
       max_total_steps: 7,
       base_url: config.baseUrl,

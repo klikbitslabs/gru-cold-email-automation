@@ -84,6 +84,7 @@ const routes = [
   [/^#\/campaigns\/(\d+)(?:\/(\w+))?$/, viewCampaign],
   [/^#\/senders/, viewSenders],
   [/^#\/tasks$/, viewTasks],
+  [/^#\/integrations$/, viewIntegrations],
   [/^#\/guide$/, viewGuide],
 ];
 
@@ -99,11 +100,12 @@ async function router() {
   $('#topbar').hidden = isAuthPage;
   if (!isAuthPage) {
     $('#user-email').textContent = currentUser?.email || '';
+    $('#nav-integrations').hidden = !currentUser?.is_admin;
     $$('[data-nav]').forEach((a) => a.classList.toggle('active', hash.startsWith(`#/${a.dataset.nav}`)));
     const jev = $('#jev-badge');
     jev.textContent = meta.jev_configured ? `Jev activo · ${meta.jev_model}` : 'Jev sin API key · reglas';
     jev.className = `badge ${meta.jev_configured ? 'ok' : 'warn'}`;
-    jev.title = meta.jev_configured ? 'Las decisiones usan TypeSafe Jev' : 'Configura TYPESAFE_API_KEY para decisiones con Jev';
+    jev.title = meta.jev_configured ? 'Las decisiones usan TypeSafe Jev' : 'Carga la API key de Jev en Integraciones';
   }
   const path = hash.split('?')[0];
   for (const [re, view] of routes) {
@@ -767,7 +769,7 @@ async function viewSenders() {
       <button class="btn" id="connect" ${meta.google_configured ? '' : 'disabled'}>+ Conectar cuenta de Google Workspace</button></div>
     ${params.get('connected') ? `<p class="notice info">Conectado: ${esc(params.get('connected'))}. Revisa la firma importada desde Gmail.</p>` : ''}
     ${params.get('error') ? `<p class="notice">${esc(params.get('error'))}</p>` : ''}
-    ${meta.google_configured ? '' : '<p class="notice">El servidor no tiene GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET. Sigue la guía del README para crear el cliente OAuth.</p>'}
+    ${meta.google_configured ? '' : `<p class="notice">Falta configurar Google OAuth. ${currentUser?.is_admin ? '<a href="#/integrations">Ve a Integraciones</a> y carga el Client ID y el Client Secret.' : 'Pide al administrador que lo configure en Integraciones.'}</p>`}
     <div class="notice info">Entregabilidad: calienta cada buzón 2–3 semanas antes de usarlo, configura SPF, DKIM y DMARC, y mantén 20–50 envíos/día por buzón. Idealmente usa un dominio secundario para cold email.</div>
     ${senders.map((s) => `
       <div class="card" data-sender="${s.id}" data-email="${esc(s.email)}">
@@ -837,6 +839,127 @@ async function viewSenders() {
       }
     })));
   });
+}
+
+// ---------------------------------------------------------------------------
+// Integrations (admin): API keys for Google Workspace and Jev
+// ---------------------------------------------------------------------------
+async function viewIntegrations() {
+  if (!currentUser?.is_admin) {
+    app.innerHTML = '<div class="card"><p>Solo el administrador puede gestionar las integraciones.</p></div>';
+    return;
+  }
+  const data = await api('/admin/integrations');
+  const s = data.settings;
+  const env = data.environment;
+  const source = (item) => (item.source === 'panel' ? '<span class="badge ok">guardado aquí</span>'
+    : item.source === 'env' ? '<span class="badge">variable de Railway</span>' : '<span class="badge warn">sin configurar</span>');
+  const copyField = (label, value) => `<div><label>${esc(label)}</label><div class="row" style="flex-wrap:nowrap"><input type="text" readonly value="${esc(value)}"><button class="btn ghost small" data-copy="${esc(value)}">Copiar</button></div></div>`;
+  const secretInput = (key, placeholder) => `<input type="password" data-key="${key}" autocomplete="new-password" placeholder="${esc(s[key].configured ? `Actual: ${s[key].value} — escribe para reemplazar` : placeholder)}">`;
+  const check = (ok, good, bad) => `<li>${ok ? '✅' : '⚠️'} ${ok ? good : bad}</li>`;
+
+  app.innerHTML = `
+    <h1>Integraciones</h1>
+    <p class="muted">Las claves se guardan cifradas (AES-256-GCM) en la base de datos y nunca se vuelven a mostrar completas. Un valor guardado aquí tiene prioridad sobre la variable de Railway del mismo nombre.</p>
+    <div class="grid3" style="margin:16px 0">
+      <div class="stat"><b>${meta.google_configured ? '✅' : '—'}</b><span>Google Workspace (senders)</span></div>
+      <div class="stat"><b>${meta.jev_configured ? '✅' : '—'}</b><span>Jev ${meta.jev_configured ? `· ${esc(meta.jev_model)}` : '(sin clave: decisiones por reglas)'}</span></div>
+      <div class="stat"><b>${env.persistent_volume && env.https ? '✅' : '⚠️'}</b><span>Servidor y almacenamiento</span></div>
+    </div>
+
+    <div class="card" id="google-card">
+      <div class="row between"><h2 style="margin:0">Google Workspace (OAuth)</h2><div>${source(s.google_client_id)} ${source(s.google_client_secret)}</div></div>
+      <details style="margin:10px 0"><summary class="small"><b>Cómo obtener las credenciales (5 minutos)</b></summary><ol class="small guide">
+        <li>En <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a> crea un proyecto y habilita la <b>Gmail API</b>.</li>
+        <li><b>Pantalla de consentimiento OAuth</b>: tipo <b>Interno</b> (si los senders son de tu organización de Workspace).</li>
+        <li><b>Credenciales → Crear credenciales → ID de cliente OAuth → Aplicación web</b>.</li>
+        <li>Pega en <b>Orígenes de JavaScript autorizados</b> y <b>URI de redireccionamiento autorizados</b> los valores de abajo.</li>
+        <li>Copia aquí el <b>Client ID</b> y el <b>Client Secret</b>, guarda y pulsa <b>Probar conexión</b>.</li></ol></details>
+      <div class="grid2">
+        ${copyField('URI de redireccionamiento autorizado', data.google.redirect_uri)}
+        ${copyField('Origen de JavaScript autorizado', data.google.javascript_origin)}
+      </div>
+      <div class="grid2" style="margin-top:12px">
+        <div><label>Client ID</label><input type="text" data-key="google_client_id" value="${esc(s.google_client_id.source === 'panel' ? s.google_client_id.value : '')}" placeholder="${esc(s.google_client_id.source === 'env' ? s.google_client_id.value : '123-abc.apps.googleusercontent.com')}"></div>
+        <div><label>Client Secret</label>${secretInput('google_client_secret', 'GOCSPX-…')}</div>
+        <div><label>Dominios permitidos <span class="hint">(opcional, separados por coma)</span></label><input type="text" data-key="allowed_google_domains" value="${esc(s.allowed_google_domains.value)}" placeholder="tuempresa.com"></div>
+        <div><label>Cuentas @gmail.com</label><select data-key="allow_consumer_gmail"><option value="false" ${s.allow_consumer_gmail.value !== 'true' ? 'selected' : ''}>No permitir (solo Workspace)</option><option value="true" ${s.allow_consumer_gmail.value === 'true' ? 'selected' : ''}>Permitir</option></select></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" data-save="google">Guardar</button>
+        <button class="btn ghost" data-test="google">Probar conexión</button>
+        ${s.google_client_secret.source === 'panel' ? '<button class="btn danger small" data-clear="google_client_id,google_client_secret">Quitar credenciales</button>' : ''}
+        <span data-result="google" class="small"></span>
+      </div>
+    </div>
+
+    <div class="card" id="jev-card">
+      <div class="row between"><h2 style="margin:0">Jev (TypeSafe)</h2><div>${source(s.typesafe_api_key)}</div></div>
+      <p class="muted small">Obtén la clave en <a href="https://typesafe.ai" target="_blank" rel="noopener">typesafe.ai</a>. Sin clave, la herramienta funciona con reglas (segmentación por palabras clave, rotación A/B).</p>
+      <div class="grid2">
+        <div><label>API key</label>${secretInput('typesafe_api_key', 'Pega tu API key de TypeSafe')}</div>
+        <div><label>Modelo</label><input type="text" data-key="typesafe_model" value="${esc(s.typesafe_model.value)}" placeholder="jev-latest"></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" data-save="jev">Guardar</button>
+        <button class="btn ghost" data-test="jev">Probar conexión</button>
+        ${s.typesafe_api_key.source === 'panel' ? '<button class="btn danger small" data-clear="typesafe_api_key">Quitar clave</button>' : ''}
+        <span data-result="jev" class="small"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Servidor (variables de Railway)</h2>
+      <p class="muted small">Estas no se editan aquí: protegen las sesiones y cifran las claves de arriba.</p>
+      <ul class="guide small">
+        ${check(env.jwt_secret, '<code>JWT_SECRET</code> configurado', 'Falta <code>JWT_SECRET</code>')}
+        ${check(env.encryption_key, '<code>ENCRYPTION_KEY</code> configurado (no lo cambies: las claves guardadas dejarían de poder leerse)', 'Falta <code>ENCRYPTION_KEY</code>')}
+        ${check(env.persistent_volume, `Base de datos en volumen persistente (<code>${esc(env.database_path)}</code>)`, `La base está en <code>${esc(env.database_path)}</code>: monta un Volume en <code>/data</code> o perderás los datos en cada deploy`)}
+        ${check(env.https, `URL pública HTTPS: <code>${esc(env.base_url)}</code>`, `La URL pública no es HTTPS (<code>${esc(env.base_url)}</code>): el pixel de aperturas y el login de Google la necesitan`)}
+        ${check(env.scheduler, 'Programador de envíos activo', 'Programador de envíos desactivado (SCHEDULER_ENABLED=false)')}
+      </ul>
+    </div>`;
+
+  $$('[data-copy]').forEach((b) => b.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(b.dataset.copy);
+      toast('Copiado');
+    } catch {
+      toast('Selecciona el texto y cópialo manualmente');
+    }
+  }));
+  const groups = { google: ['google_client_id', 'google_client_secret', 'allowed_google_domains', 'allow_consumer_gmail'], jev: ['typesafe_api_key', 'typesafe_model'] };
+  // Reload meta and re-render through the router so the top bar (Jev badge) updates too.
+  const refresh = async () => {
+    meta = await fetch('/api/meta').then((r) => r.json());
+    await router();
+  };
+  $$('[data-save]').forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+    const patch = {};
+    for (const key of groups[b.dataset.save]) {
+      const input = $(`[data-key="${key}"]`);
+      // Empty secret inputs mean "keep the current value".
+      if (input.type === 'password' && !input.value.trim()) continue;
+      patch[key] = input.value.trim();
+    }
+    await api('/admin/integrations', { method: 'PUT', body: patch });
+    toast('Guardado');
+    await refresh();
+  })));
+  $$('[data-clear]').forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+    if (!confirm('¿Quitar estas credenciales? Se usará la variable de Railway si existe.')) return;
+    await api('/admin/integrations', { method: 'PUT', body: Object.fromEntries(b.dataset.clear.split(',').map((k) => [k, null])) });
+    await refresh();
+  })));
+  $$('[data-test]').forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+    const out = $(`[data-result="${b.dataset.test}"]`);
+    out.textContent = 'Probando…';
+    const r = await api(`/admin/integrations/test-${b.dataset.test}`, { method: 'POST' });
+    out.style.color = r.ok ? 'var(--ok)' : 'var(--bad)';
+    out.textContent = r.ok
+      ? (r.message || `Conectado · modelo ${r.model} · ${r.latency_ms} ms`)
+      : r.error;
+  })));
 }
 
 // ---------------------------------------------------------------------------

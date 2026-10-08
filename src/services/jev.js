@@ -8,22 +8,39 @@
 
 import crypto from 'node:crypto';
 import { TypeSafeClient, choice, noul, score } from '@typesafe-ai/sdk';
-import { config, jevConfigured } from '../config.js';
+import { integrations, jevConfigured } from './settings.js';
 
 export const SLOTS = ['early', 'middle', 'late'];
 const STOP_THRESHOLD = 0.85;
 const SLOT_MIN_CONFIDENCE = 0.5;
 
 let sharedClient = null;
+let sharedKey = '';
+/** TypeSafe client built from the current settings; rebuilt when the key or model changes. */
 function defaultClient() {
   if (!jevConfigured()) return null;
-  sharedClient ??= new TypeSafeClient({
-    apiKey: config.typesafe.apiKey,
-    defaultModel: config.typesafe.model,
-    baseURL: config.typesafe.baseURL,
-    timeout: 15000,
-  });
+  const { apiKey, model, baseURL } = integrations.typesafe();
+  const key = `${apiKey}|${model}|${baseURL || ''}`;
+  if (!sharedClient || key !== sharedKey) {
+    sharedClient = new TypeSafeClient({ apiKey, defaultModel: model, baseURL, timeout: 15000 });
+    sharedKey = key;
+  }
   return sharedClient;
+}
+
+/** Verifies credentials with a minimal request (used by the admin panel's "Probar" button). */
+export async function testJevConnection(client = defaultClient()) {
+  if (!client) return { ok: false, error: 'Falta la API key de TypeSafe.' };
+  const started = Date.now();
+  try {
+    const result = await client.systemOne({
+      state: 'Hola, ¿pueden enviarme información sobre sus precios?',
+      questions: { sales: noul('Is this message asking about buying or pricing?') },
+    });
+    return { ok: true, model: result.model, latency_ms: Date.now() - started, answer: result.answers.sales.noul };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err).slice(0, 300), status: err.status };
+  }
 }
 
 const truncate = (value, max = 400) => {

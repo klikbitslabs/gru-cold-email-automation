@@ -1,5 +1,6 @@
 import { OAuth2Client } from 'google-auth-library';
 import { config } from '../config.js';
+import { integrations } from './settings.js';
 
 export const GOOGLE_SCOPES = [
   'openid',
@@ -15,9 +16,10 @@ const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me';
 export const redirectUri = () => `${config.baseUrl}/api/senders/google/callback`;
 
 function oauthClient() {
+  const { clientId, clientSecret } = integrations.google();
   return new OAuth2Client({
-    clientId: config.google.clientId,
-    clientSecret: config.google.clientSecret,
+    clientId,
+    clientSecret,
     redirectUri: redirectUri(),
   });
 }
@@ -39,7 +41,7 @@ export async function exchangeCode(code) {
   const client = oauthClient();
   const { tokens } = await client.getToken(code);
   if (!tokens.refresh_token) throw new Error('Google no devolvió refresh token. Revoca el acceso y vuelve a conectar.');
-  const ticket = await client.verifyIdToken({ idToken: tokens.id_token, audience: config.google.clientId });
+  const ticket = await client.verifyIdToken({ idToken: tokens.id_token, audience: integrations.google().clientId });
   const payload = ticket.getPayload();
   return {
     refreshToken: tokens.refresh_token,
@@ -53,10 +55,11 @@ export async function exchangeCode(code) {
 /** Checks the account is an allowed Google Workspace (G Suite) mailbox. */
 export function validateWorkspaceAccount({ hostedDomain, emailVerified }) {
   if (!emailVerified) return 'El email de Google no está verificado.';
-  if (!hostedDomain && !config.google.allowConsumerGmail) {
+  const google = integrations.google();
+  if (!hostedDomain && !google.allowConsumerGmail) {
     return 'Solo se aceptan cuentas de Google Workspace (G Suite). Las cuentas @gmail.com están deshabilitadas (ALLOW_CONSUMER_GMAIL).';
   }
-  const allowed = config.google.allowedDomains;
+  const allowed = google.allowedDomains;
   if (hostedDomain && allowed.length && !allowed.includes(hostedDomain.toLowerCase())) {
     return `El dominio ${hostedDomain} no está en ALLOWED_GOOGLE_DOMAINS.`;
   }

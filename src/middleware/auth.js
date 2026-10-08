@@ -20,7 +20,7 @@ export function verifyOAuthState(state) {
 }
 
 export function requireAuth(db) {
-  const findUser = db.prepare('SELECT id, email, name FROM users WHERE id = ?');
+  const findUser = db.prepare('SELECT id, email, name, is_admin FROM users WHERE id = ?');
   return (req, res, next) => {
     const header = req.headers.authorization || '';
     const token = header.startsWith('Bearer ') ? header.slice(7) : null;

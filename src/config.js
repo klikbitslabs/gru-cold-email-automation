@@ -36,23 +36,6 @@ export const config = {
   // 32-byte key (hex or base64) used to encrypt Google refresh tokens at rest.
   encryptionKey: required('ENCRYPTION_KEY', crypto.createHash('sha256').update('test').digest('hex')),
 
-  google: {
-    clientId: env.GOOGLE_CLIENT_ID || '',
-    clientSecret: env.GOOGLE_CLIENT_SECRET || '',
-    // Only Google Workspace accounts (with a hosted domain) are accepted unless this is true.
-    allowConsumerGmail: bool(env.ALLOW_CONSUMER_GMAIL, false),
-    // Optional comma separated list of Workspace domains allowed as senders.
-    allowedDomains: (env.ALLOWED_GOOGLE_DOMAINS || '')
-      .split(',')
-      .map((d) => d.trim().toLowerCase())
-      .filter(Boolean),
-  },
-
-  typesafe: {
-    apiKey: env.TYPESAFE_API_KEY || '',
-    model: env.TYPESAFE_MODEL || 'jev-latest',
-    baseURL: env.TYPESAFE_BASE_URL || undefined,
-  },
 
   sequence: {
     // Initial email + follow-ups. Best practice (Clay, Instantly): ~4 touches max.
@@ -72,5 +55,4 @@ export const config = {
   },
 };
 
-export const googleConfigured = () => Boolean(config.google.clientId && config.google.clientSecret);
-export const jevConfigured = () => Boolean(config.typesafe.apiKey);
+// Google / TypeSafe credentials live in services/settings.js (admin panel, env fallback).

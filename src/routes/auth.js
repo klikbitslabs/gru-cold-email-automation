@@ -22,8 +22,10 @@ export function authRoutes(db) {
       return res.status(409).json({ error: 'Ya existe una cuenta con ese correo' });
     }
     const hash = await bcrypt.hash(password, 12);
-    const { lastInsertRowid } = db.prepare('INSERT INTO users (email, name, password_hash) VALUES (?, ?, ?)').run(email, name || '', hash);
-    const user = { id: Number(lastInsertRowid), email, name: name || '' };
+    // The first account becomes the administrator (manages integrations / API keys).
+    const isAdmin = db.prepare('SELECT 1 FROM users LIMIT 1').get() ? 0 : 1;
+    const { lastInsertRowid } = db.prepare('INSERT INTO users (email, name, password_hash, is_admin) VALUES (?, ?, ?, ?)').run(email, name || '', hash, isAdmin);
+    const user = { id: Number(lastInsertRowid), email, name: name || '', is_admin: isAdmin };
     res.status(201).json({ token: signUserToken(user), user });
   });
 
@@ -33,7 +35,7 @@ export function authRoutes(db) {
     // Compare against a dummy hash when the user does not exist to keep timing uniform.
     const ok = await bcrypt.compare(password, row?.password_hash || '$2a$12$C6UzMDM.H6dfI/f/IKcEeO1uZ5yQZr6pDZOxJr8VOMjK6Ad0WZ7Ga');
     if (!row || !ok) return res.status(401).json({ error: 'Correo o contraseña incorrectos' });
-    const user = { id: row.id, email: row.email, name: row.name };
+    const user = { id: row.id, email: row.email, name: row.name, is_admin: row.is_admin };
     res.json({ token: signUserToken(user), user });
   });
 
