@@ -94,6 +94,7 @@ const FOCUS = {
   subject: 'la tasa de apertura es baja; prueba asuntos claramente distintos (más específicos para el cargo o el problema) y mantén el cuerpo que mejor funciona.',
   followup: 'este seguimiento no está generando respuestas; cambia el ángulo (otro problema, prueba social concreta o un cierre respetuoso) en lugar de repetir el mensaje anterior.',
   challenger: 'crea retadores de la variante ganadora cambiando una sola cosa a la vez.',
+  simple: 'escritura simple y humana (estándar 2026): frases cortas, palabras cotidianas, cero adjetivos de marketing, sin enlaces ni imágenes; que parezca escrito a mano por una persona para otra.',
   persona: 'este perfil todavía no tiene un mensaje propio; escribe uno centrado en su motivación, distinto del que reciben otros cargos de la misma empresa.',
 };
 
@@ -103,7 +104,7 @@ const FOCUS = {
  * @returns {Promise<{ variants: Array, model: string }>}
  */
 export async function generateVariants(ctx, { fetchFn = fetch } = {}) {
-  const { brand, campaign, segment, persona = null, stepNumber, channel = 'email', count = 2, performance = [], fields = [], sameThread = true, focus = '' } = ctx;
+  const { brand, campaign, segment, persona = null, industry = '', stepNumber, channel = 'email', count = 2, performance = [], fields = [], sameThread = true, focus = '' } = ctx;
   const isFirst = stepNumber === 1;
   const ranked = [...performance].sort((a, b) => (b.reply_rate ?? 0) - (a.reply_rate ?? 0) || (b.open_rate ?? 0) - (a.open_rate ?? 0));
   const history = ranked.length
@@ -112,6 +113,7 @@ export async function generateVariants(ctx, { fetchFn = fetch } = {}) {
 
   const system = `Eres un redactor senior de cold email B2B en español natural (adaptado al país y sector del cliente).
 Escribes correos humanos, directos, respetuosos y sin exageraciones, que se leen en menos de 60 segundos.
+Escritura simple: frases cortas, palabras de todos los días, nada de jerga de marketing.
 Devuelves SOLO JSON con la forma {"variants":[{"label","angle","subject","body","rationale"}]}.`;
 
   const rules = channel !== 'email'
@@ -133,7 +135,7 @@ Campaña: ${campaign.name}
 Oferta: ${campaign.offer || '(ver propuesta de valor)'}
 ICP: ${campaign.icp || '(ver industrias y funciones de la marca)'}
 Segmento: ${segment ? `${segment.name} — ${segment.description}` : 'todos los prospectos'}
-${personaBlock(persona)}
+${industry ? `Industria del grupo: ${industry}. Usa ejemplos y vocabulario de esta industria.\n` : ''}${personaBlock(persona)}
 Paso ${stepNumber} de la secuencia (${channel}).
 
 ${rules}
@@ -153,4 +155,34 @@ ${FOCUS[focus] ? `Objetivo de esta ronda: ${FOCUS[focus]}\n\n` : ''}Escribe ${co
       quality: channel === 'email' ? lintTemplate({ subject: v.subject, body: v.body, stepNumber, threadReply: !isFirst }).issues : [],
     })),
   };
+}
+
+const replySchema = z.object({ subject: z.string().trim().max(200).default(''), body: z.string().trim().min(1).max(3000) });
+
+/**
+ * Drafts the answer to a prospect's reply (interested, question, referral). The user reviews
+ * and sends it from Tareas; nothing is sent automatically.
+ * @param ctx { brand, persona, prospect, sender, category, replyText, lastEmail, meetingLink }
+ */
+export async function draftReply(ctx, { fetchFn = fetch } = {}) {
+  const { brand, persona, prospect, sender, category, replyText, lastEmail, meetingLink } = ctx;
+  const goal = {
+    interested: 'Agradece en una línea y propone una reunión corta: ofrece 2 opciones concretas de día/hora (escribe [día] [hora] como marcadores para que el remitente los complete) o el enlace de agenda si existe.',
+    question: 'Responde la pregunta con honestidad y en pocas líneas (si no tienes el dato, dilo y ofrece verlo en una llamada) y termina proponiendo una reunión corta.',
+    referral: 'Agradece la referencia y pide, con amabilidad, el contacto o que te presente; propone escribirle mencionando que viene de su parte.',
+  }[category] || 'Responde de forma breve y propone el siguiente paso.';
+  const system = 'Eres el remitente respondiendo a un prospecto en un hilo de correo B2B en español natural. Respuestas breves (40–90 palabras), cálidas y concretas, sin repetir el pitch. Devuelve SOLO JSON {"subject","body"} (subject vacío: se responde en el mismo hilo). No firmes: la firma se agrega sola. No inventes datos, precios ni clientes.';
+  const user = [
+    brand ? brandBlock(brand) : '',
+    persona ? `Perfil del prospecto: ${persona.name}. Le importa: ${persona.motivation}` : '',
+    `Prospecto: ${[prospect.first_name, prospect.last_name].filter(Boolean).join(' ')} — ${prospect.title || ''} en ${prospect.company || ''}`,
+    `Remitente: ${sender?.display_name || ''}`,
+    lastEmail ? `Nuestro último correo:\n${lastEmail}` : '',
+    `Su respuesta (${category}):\n${replyText}`,
+    meetingLink ? `Enlace de agenda: ${meetingLink}` : 'No hay enlace de agenda: propone dos horarios con marcadores [día] [hora].',
+    `Objetivo: ${goal}`,
+  ].filter(Boolean).join('\n\n');
+  const { json, model } = await chatJSON({ system, user, temperature: 0.5, fetchFn });
+  const parsed = replySchema.parse(json);
+  return { model, subject: parsed.subject, body: parsed.body };
 }

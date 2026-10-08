@@ -86,6 +86,7 @@ export function gmailForRefreshToken(refreshToken) {
       const thread = await call(`${GMAIL}/threads/${threadId}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`);
       return (thread.messages || []).map((m) => ({
         id: m.id,
+        threadId: m.threadId,
         labelIds: m.labelIds || [],
         snippet: m.snippet || '',
         from: (m.payload?.headers || []).find((h) => h.name.toLowerCase() === 'from')?.value || '',
@@ -99,6 +100,7 @@ export function gmailForRefreshToken(refreshToken) {
         const m = await call(`${GMAIL}/messages/${id}?format=metadata&metadataHeaders=From`);
         out.push({
           id: m.id,
+          threadId: m.threadId,
           labelIds: m.labelIds || [],
           snippet: m.snippet || '',
           from: (m.payload?.headers || []).find((h) => h.name.toLowerCase() === 'from')?.value || '',

@@ -270,3 +270,12 @@ ol.questions li.q-no { color: var(--text); }
 .persona-grid label { margin-bottom: 2px; }
 @media (max-width: 640px) { .persona-grid { grid-template-columns: 1fr; } .persona-grid .span2 { grid-column: auto; } }
 .badge.persona { background: var(--ok-soft); color: var(--ok); }
+.tabs-sep { align-self: center; margin-left: 12px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.tabs button.adv { font-size: 13px; padding: 10px 10px; }
+.group-card .group-label { width: auto; min-width: 260px; font-weight: 600; }
+.group-step { margin-top: 14px; }
+.group-step h3 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; margin-bottom: 4px; }
+.inbox-h { margin-top: 22px; }
+.inbox-empty { margin: -4px 0 8px; }
+.reply-quote { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--ok); background: var(--bg); border-radius: 0 8px 8px 0; white-space: pre-wrap; }
+.group-preview { margin-top: 8px; } .group-preview summary { cursor: pointer; color: var(--accent); font-weight: 600; } .group-preview .preview-mail { margin-top: 6px; }

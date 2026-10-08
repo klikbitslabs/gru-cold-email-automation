@@ -28,6 +28,7 @@ export const brandSchema = z.object({
   ref_email: text(3000),
   ref_call: text(2000),
   avoid: text(1000),
+  meeting_link: text(300),
   personas: z.array(personaSchema).max(12).default([]),
 });
 

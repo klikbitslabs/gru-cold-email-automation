@@ -17,14 +17,25 @@ import { allFieldsPresent, buildEmailBody, prospectVariables, renderTemplate, te
 import { addDays, inSendWindow, localParts, nextLocalSlot } from '../lib/time.js';
 import { extractEmail, gmailForRefreshToken } from './google.js';
 import { runDecisions } from './decisions.js';
+import { assignGroup } from './groups.js';
 import { analyzeProspect, classifyReply, decide, slotForMinute, slotRanges } from './jev.js';
-import { generateVariants } from './openai.js';
+import { draftReply, generateVariants } from './openai.js';
+import { improveReplyDrafts, recordReply } from './replies.js';
 
 const DAY_MS = 86400000;
 // Only credential problems disable a sender; 403/429 rate limits are retried on the next tick.
 const AUTH_ERROR_RE = /invalid_grant|invalid credentials|insufficient (permission|authentication scopes)|unauthorized_client|\b401\b/i;
 const OUTCOME_RANK = { interested: 1, meeting: 2, opportunity: 3, won: 4, lost: 0 };
 const TRIVIAL_FIELDS = new Set(['first_name', 'last_name', 'full_name', 'email', 'company', 'sender_name', 'sender_first_name', 'sender_email', 'cta', 'problema', 'gancho']);
+
+/** Background jobs ("crons") run by the scheduler, described for the Tareas screen. */
+export const JOBS = {
+  replies: { label: 'Revisar respuestas', every: 'cada ciclo (lotes de 25)', help: 'Lee los hilos de tus prospectos en Gmail, clasifica respuestas, detiene la secuencia y prepara la respuesta sugerida.' },
+  reply_drafts: { label: 'Redactar respuestas con IA', every: 'cada ciclo', help: 'Mejora con OpenAI los borradores de respuesta (si está configurado).' },
+  analyze: { label: 'Analizar leads', every: 'cada ciclo (lotes de 25)', help: 'Responde las 5 preguntas, asigna perfil, estado y grupo a cada lead nuevo.' },
+  send: { label: 'Preparar y enviar correos', every: 'cada ciclo', help: 'Prepara primeros correos y seguimientos de los grupos aprobados y los envía cumpliendo tus reglas: horario, límite diario, pausa y reglas por empresa.' },
+  decisions: { label: 'Analizar resultados y proponer cambios', every: 'cada hora', help: 'Revisa resultados y propone cambios de asunto, cuerpo, ventana o límites; te pide permiso en Tareas.' },
+};
 
 export function trackingPixelUrl(token) {
   return `${config.baseUrl}/t/o/${token}.gif`;
@@ -148,7 +159,7 @@ export function candidatesFor(db, { campaign, prospect, step, sender }) {
     : null;
   return {
     persona,
-    variants: forPersona(forSegment(step.variants.filter((v) => (v.status || 'active') === 'active'), prospect.segment_id), persona?.id),
+    variants: variantsFor(step, prospect, persona),
     hooks: hooks.map(preview),
     problems: (personaProblem || problems).map(preview),
     ctas: personaCta || db.prepare('SELECT * FROM ctas WHERE campaign_id = ? ORDER BY id').all(campaign.id),
@@ -156,6 +167,17 @@ export function candidatesFor(db, { campaign, prospect, step, sender }) {
 }
 
 const storedId = (snippet) => (snippet && snippet.id > 0 ? snippet.id : null);
+
+/**
+ * Copy for a prospect at a step: the approved messages of its group when they exist,
+ * otherwise the campaign's base variants (never another group's messages).
+ */
+export function variantsFor(step, prospect, persona) {
+  const active = step.variants.filter((v) => (v.status || 'active') === 'active');
+  const own = prospect.group_id ? active.filter((v) => v.group_id === prospect.group_id) : [];
+  if (own.length) return own;
+  return forPersona(forSegment(active.filter((v) => !v.group_id), prospect.segment_id), persona?.id);
+}
 
 /** Id given to the persona's own problem/CTA (not stored as snippets; saved as NULL). */
 export const PERSONA_SNIPPET_ID = -1;
@@ -201,8 +223,10 @@ export function argumentIssues({ persona, variant, problem, body, stepNumber, co
   return issues;
 }
 
-export function needsApproval(mode, stepNumber, quality) {
+export function needsApproval(mode, stepNumber, quality, groupApproved = false) {
   if (!quality.passed) return true; // errors always need a person
+  // Group mode: the group's messages were approved once; only drafts with warnings need a person.
+  if (mode === 'group') return !groupApproved || quality.warnings > 0;
   if (mode === 'all') return true;
   if (mode === 'first' && stepNumber === 1) return true;
   return mode !== 'none' && quality.warnings > 0;
@@ -292,6 +316,7 @@ export async function analyzeAndClassify(db, prospect, campaign, { analyzeFn = a
   }
   const keys = Object.keys(update);
   db.prepare(`UPDATE prospects SET ${keys.map((k) => `${k} = @${k}`).join(', ')} WHERE id = @id`).run({ ...update, id: prospect.id });
+  assignGroup(db, campaign, { ...prospect, ...update });
   return { analysis, verdict };
 }
 
@@ -302,6 +327,7 @@ export function createScheduler({
   analyzeFn = analyzeProspect,
   classifyFn = classifyReply,
   generateFn = generateVariants,
+  draftFn = draftReply,
   decisionsEveryMinutes = 60,
   now = () => new Date(),
   log = console,
@@ -382,7 +408,11 @@ export function createScheduler({
       stmts.logDecision.run(prospect.id, prospect.current_step, result.engine, `reply:${result.category}`, JSON.stringify({ from: msg.from, snippet: msg.snippet.slice(0, 300), confidence: result.confidence }), nowIso(now()));
       if (result.category === 'auto_reply') continue;
       outcome = result.category;
-      if (outcome !== 'bounce') break;
+      if (outcome !== 'bounce') {
+        // Interested / question / referral: prepare a suggested answer for Tareas.
+        recordReply(db, { prospect, campaign, sender, msg, category: outcome, at: now() });
+        break;
+      }
     }
     const update = { seen_message_ids_json: JSON.stringify([...seen].slice(-200)), last_reply_check_at: nowIso(now()) };
     if (outcome === 'bounce') {
@@ -427,6 +457,7 @@ export function createScheduler({
         log.warn?.(`[scheduler] reply check failed for prospect ${prospect.id}: ${err.message}`);
       }
     }
+    return { checked: rows.length };
   }
 
   // -------------------------------------------------------------------------
@@ -506,7 +537,9 @@ export function createScheduler({
       if (extra.severity === 'warning') quality.warnings += 1;
     }
     quality.passed = !quality.errors;
-    const status = needsApproval(campaign.approval_mode || 'first', step.step_number, quality) ? 'pending' : 'approved';
+    const group = prospect.group_id ? db.prepare('SELECT status FROM message_groups WHERE id = ?').get(prospect.group_id) : null;
+    const usesGroupCopy = Boolean(variant.group_id && variant.group_id === prospect.group_id);
+    const status = needsApproval(campaign.approval_mode || 'first', step.step_number, quality, group?.status === 'approved' && usesGroupCopy) ? 'pending' : 'approved';
     const id = Number(db.prepare(
       `INSERT INTO drafts (prospect_id, campaign_id, step_number, sender_id, variant_id, cta_id, hook_id, problem_id, persona_id, subject, body,
          same_thread, quality_json, decision_json, status, created_at)
@@ -587,7 +620,7 @@ export function createScheduler({
   function createTask({ campaign, prospect, step, senders }) {
     const exists = db.prepare("SELECT 1 FROM tasks WHERE prospect_id = ? AND step_number = ? AND status = 'open'").get(prospect.id, step.step_number);
     if (!exists) {
-      const variant = forSegment(step.variants, prospect.segment_id)[0];
+      const variant = forSegment(step.variants.filter((v) => !v.group_id), prospect.segment_id)[0];
       const sender = (prospect.sender_id && stmts.sender.get(prospect.sender_id)) || senders[0] || null;
       const vars = prospectVariables(prospect, senderVars(sender));
       const instructions = variant ? renderTemplate(variant.body, vars).text : '';
@@ -604,6 +637,11 @@ export function createScheduler({
   // Sending rules (campaign level) and account rules (company level)
   // -------------------------------------------------------------------------
   /** Campaign daily cap and minimum delay between two emails of the campaign. */
+  function groupReady(prospect) {
+    if (!prospect.group_id) return false;
+    return db.prepare("SELECT status FROM message_groups WHERE id = ?").get(prospect.group_id)?.status === 'approved';
+  }
+
   function campaignCanSend(campaign, at) {
     const since = new Date(at.getTime() - DAY_MS).toISOString();
     const sent = db.prepare('SELECT COUNT(*) AS n, MAX(sent_at) AS last FROM messages WHERE campaign_id = ? AND sent_at > ?').get(campaign.id, since);
@@ -687,6 +725,9 @@ export function createScheduler({
         continue;
       }
 
+      // Group mode: nothing is drafted until the user approves the messages of the prospect's group.
+      if (campaign.approval_mode === 'group' && !groupReady(prospect)) continue;
+
       // Never follow up on someone who already replied.
       const threadOwner = prospect.sender_id ? stmts.sender.get(prospect.sender_id) : null;
       if (stepNumber > 1 && campaign.stop_on_reply && threadOwner && threadOwner.status !== 'error' && prospect.thread_id) {
@@ -741,32 +782,57 @@ export function createScheduler({
     return sentCount;
   }
 
+  /** Runs one background job and records its last run/result (shown in Tareas → Automatizaciones). */
+  async function runJob(name, fn) {
+    const at = nowIso(now());
+    try {
+      const result = await fn();
+      db.prepare(
+        `INSERT INTO jobs (name, last_run_at, last_ok_at, last_result, last_error, runs) VALUES (?, ?, ?, ?, NULL, 1)
+         ON CONFLICT (name) DO UPDATE SET last_run_at = excluded.last_run_at, last_ok_at = excluded.last_ok_at,
+           last_result = excluded.last_result, last_error = NULL, runs = runs + 1`,
+      ).run(name, at, at, JSON.stringify(result ?? null).slice(0, 500));
+      return result;
+    } catch (err) {
+      db.prepare(
+        `INSERT INTO jobs (name, last_run_at, last_error, runs) VALUES (?, ?, ?, 1)
+         ON CONFLICT (name) DO UPDATE SET last_run_at = excluded.last_run_at, last_error = excluded.last_error, runs = runs + 1`,
+      ).run(name, at, String(err.message || err).slice(0, 500));
+      log.error?.(`[scheduler] job ${name} failed`, err);
+      return null;
+    }
+  }
+
   let running = false;
   let lastDecisions = null;
   async function tick() {
     if (running) return { skipped: true };
     running = true;
     try {
-      await checkReplies();
-      const analyzed = await analyzeLeads();
+      await runJob('replies', checkReplies);
+      await runJob('reply_drafts', () => improveReplyDrafts(db, { draftFn, log }));
+      const analyzed = (await runJob('analyze', analyzeLeads)) ?? 0;
       // Decision center: refresh recommendations and auto-apply the permitted ones (hourly).
       const at = now();
       if (!lastDecisions || at - lastDecisions >= decisionsEveryMinutes * 60000) {
         lastDecisions = at;
-        await runDecisions(db, { generateFn, now, log }).catch((err) => log.error?.('[scheduler] decisions failed', err));
+        await runJob('decisions', () => runDecisions(db, { generateFn, now, log }));
       }
-      const usedSenders = new Set();
-      let sent = 0;
-      for (const campaign of stmts.activeCampaigns.all()) {
-        sent += await processCampaign(campaign, usedSenders);
-        const open = db.prepare(
-          `SELECT COUNT(*) AS n FROM prospects p WHERE p.campaign_id = ? AND p.status = 'active'`,
-        ).get(campaign.id).n;
-        const total = db.prepare('SELECT COUNT(*) AS n FROM prospects WHERE campaign_id = ?').get(campaign.id).n;
-        if (total > 0 && open === 0) {
-          db.prepare("UPDATE campaigns SET status = 'completed' WHERE id = ? AND status = 'active'").run(campaign.id);
+      const sent = (await runJob('send', async () => {
+        const usedSenders = new Set();
+        let n = 0;
+        for (const campaign of stmts.activeCampaigns.all()) {
+          n += await processCampaign(campaign, usedSenders);
+          const open = db.prepare(
+            `SELECT COUNT(*) AS n FROM prospects p WHERE p.campaign_id = ? AND p.status = 'active'`,
+          ).get(campaign.id).n;
+          const total = db.prepare('SELECT COUNT(*) AS n FROM prospects WHERE campaign_id = ?').get(campaign.id).n;
+          if (total > 0 && open === 0) {
+            db.prepare("UPDATE campaigns SET status = 'completed' WHERE id = ? AND status = 'active'").run(campaign.id);
+          }
         }
-      }
+        return n;
+      })) ?? 0;
       return { sent, analyzed };
     } finally {
       running = false;

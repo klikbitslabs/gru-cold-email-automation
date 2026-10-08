@@ -71,7 +71,7 @@ export function abGroups(db, campaignId) {
   const groups = new Map();
   for (const v of rows) {
     // Variants compete only against variants for the same step, segment and buyer persona.
-    const key = `${v.step_number}|${v.segment || ''}|${v.persona_id || ''}`;
+    const key = `${v.step_number}|${v.segment || ''}|${v.persona_id || ''}|${v.group_id || ''}`;
     if (!groups.has(key)) groups.set(key, { step_number: v.step_number, segment: v.segment || '', persona_id: v.persona_id || null, persona: v.persona || '', variants: [] });
     const st = perf.get(v.id) || { sent: 0, replied: 0, positive: 0 };
     groups.get(key).variants.push({

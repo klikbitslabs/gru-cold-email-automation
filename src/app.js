@@ -12,6 +12,7 @@ import { adminRoutes } from './routes/admin.js';
 import { analyticsRoutes } from './routes/analytics.js';
 import { authRoutes } from './routes/auth.js';
 import { brandRoutes } from './routes/brands.js';
+import { inboxRoutes } from './routes/inbox.js';
 import { campaignRoutes } from './routes/campaigns.js';
 import { companyRoutes } from './routes/companies.js';
 import { senderRoutes } from './routes/senders.js';
@@ -24,7 +25,7 @@ const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 
 /**
  * @param deps { db, scheduler?, gmailFor?, decideFn?, analyzeFn?, generateFn?, mx?, now?, testJev?, testGoogle?, testOpenAI? } — injectable for tests.
  */
-export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, generateFn, mx, now, testJev, testGoogle, testOpenAI } = {}) {
+export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, generateFn, draftFn, mx, now, testJev, testGoogle, testOpenAI } = {}) {
   bindSettings(db);
   const inject = (deps) => Object.fromEntries(Object.entries(deps).filter(([, v]) => v !== undefined));
   const app = express();
@@ -75,10 +76,12 @@ export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, genera
       allow_registration: config.allowRegistration,
       lawful_bases: LAWFUL_BASES,
       golden_rules: GOLDEN_RULES,
+      scheduler_seconds: config.scheduler.intervalSeconds,
     });
   });
 
   app.use('/api', analyticsRoutes(db, inject({ now, generateFn })));
+  app.use('/api', inboxRoutes(db, inject({ now, generateFn, draftFn, gmailFor })));
 
   app.post('/api/lint', requireAuth(db), (req, res) => {
     const input = z.object({

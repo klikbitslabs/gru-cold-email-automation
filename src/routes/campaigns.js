@@ -11,6 +11,7 @@ import { templateFields } from '../lib/template.js';
 import { campaignSchedule, isValidTimeZone } from '../lib/time.js';
 import { createMxChecker, LAWFUL_BASES, validateLeads } from '../lib/validate.js';
 import { requireAuth } from '../middleware/auth.js';
+import { regroupCampaign } from '../services/groups.js';
 import { analyzeProspect, decide } from '../services/jev.js';
 import { candidatesFor, engagementFor, loadSequence, performanceStats, renderDraft } from '../services/scheduler.js';
 
@@ -52,7 +53,8 @@ const campaignSchema = z
     include_unsubscribe: z.boolean().default(true),
     jev_enabled: z.boolean().default(true),
     stop_on_reply: z.boolean().default(true),
-    approval_mode: z.enum(['all', 'first', 'issues', 'none']).default('all'),
+    approval_mode: z.enum(['group', 'all', 'first', 'issues', 'none']).default('all'),
+    group_by: z.enum(['industry_persona', 'persona', 'industry', 'segment', 'single']).default('industry_persona'),
     brand_id: z.number().int().nullable().default(null),
     schedule: z
       .record(z.enum(['1', '2', '3', '4', '5', '6', '7']), z.object({ on: z.boolean(), start: HHMM, end: HHMM }))
@@ -150,7 +152,7 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
         channel: s.channel,
         delay_days: s.delay_days,
         same_thread: Boolean(s.same_thread),
-        variants: s.variants.map((v) => ({ id: v.id, status: v.status, origin: v.origin, rationale: v.rationale, label: v.label, angle: v.angle, segment: segName(v.segment_id), persona_id: v.persona_id ?? null, subject: v.subject, body: v.body })),
+        variants: s.variants.filter((v) => !v.group_id).map((v) => ({ id: v.id, status: v.status, origin: v.origin, rationale: v.rationale, label: v.label, angle: v.angle, segment: segName(v.segment_id), persona_id: v.persona_id ?? null, subject: v.subject, body: v.body })),
       })),
       hooks: snippetOut('hook'),
       problems: snippetOut('problem'),
@@ -174,6 +176,7 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
       jev_enabled: data.jev_enabled ? 1 : 0,
       stop_on_reply: data.stop_on_reply ? 1 : 0,
       approval_mode: data.approval_mode,
+      group_by: data.group_by,
       brand_id: data.brand_id && db.prepare('SELECT 1 FROM brands WHERE id = ? AND user_id = ?').get(data.brand_id, userId) ? data.brand_id : null,
       max_per_day: data.max_per_day,
       delay_minutes: data.delay_minutes,
@@ -207,7 +210,7 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
     function sync(table, scope, rows, insert, update) {
       const keep = [];
       for (const row of rows) {
-        const current = row.id && db.prepare(`SELECT id FROM ${table} WHERE id = ? AND ${scope.column} = ?`).get(row.id, scope.value);
+        const current = row.id && db.prepare(`SELECT id FROM ${table} WHERE id = ? AND ${scope.column} = ?${scope.extra ? ` AND ${scope.extra}` : ''}`).get(row.id, scope.value);
         if (current) {
           update(current.id, row);
           keep.push(current.id);
@@ -237,7 +240,8 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
       } else {
         stepRow = { id: Number(db.prepare('INSERT INTO steps (campaign_id, step_number, delay_days, same_thread, channel) VALUES (?, ?, ?, ?, ?)').run(id, number, delay, step.same_thread ? 1 : 0, step.channel).lastInsertRowid) };
       }
-      sync('variants', { column: 'step_id', value: stepRow.id }, step.variants,
+      // Group messages are managed in the Groups tab: the base sequence never touches them.
+      sync('variants', { column: 'step_id', value: stepRow.id, extra: 'group_id IS NULL' }, step.variants,
         (v) => Number(db.prepare('INSERT INTO variants (step_id, label, angle, segment_id, persona_id, subject, body, status, origin, rationale) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(stepRow.id, v.label, v.angle, segId(v.segment), personaId(v), v.subject, v.body, v.status, v.origin, v.rationale).lastInsertRowid),
         (vid, v) => db.prepare('UPDATE variants SET label = ?, angle = ?, segment_id = ?, persona_id = ?, subject = ?, body = ?, status = ?, origin = ?, rationale = ? WHERE id = ?').run(v.label, v.angle, segId(v.segment), personaId(v), v.subject, v.body, v.status, v.origin, v.rationale, vid));
     });
@@ -315,6 +319,7 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
     if (!c) return res.status(404).json({ error: 'Campaña no encontrada' });
     saveCampaign(req.user.id, c.id, campaignSchema.parse(req.body));
     const updated = own(req);
+    if (updated.group_by !== c.group_by) regroupCampaign(db, updated);
     const ready = readiness(updated);
     const response = { campaign: fullCampaign(updated), readiness: ready };
     if (updated.status === 'active' && ready.problems.length) {

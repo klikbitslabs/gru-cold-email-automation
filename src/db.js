@@ -275,6 +275,52 @@ CREATE TABLE IF NOT EXISTS tasks (
   completed_at TEXT
 );
 
+-- Message groups (clusters): prospects grouped by industry × buyer persona (configurable).
+-- The user approves each group's messages once; every prospect of the group then gets them.
+CREATE TABLE IF NOT EXISTS message_groups (
+  id INTEGER PRIMARY KEY,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  keys_json TEXT NOT NULL DEFAULT '[]',     -- other keys merged into this group
+  label TEXT NOT NULL,
+  industry TEXT NOT NULL DEFAULT '',
+  persona_id INTEGER REFERENCES personas(id) ON DELETE SET NULL,
+  segment_id INTEGER REFERENCES segments(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','pending','approved','paused')),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  approved_at TEXT,
+  UNIQUE (campaign_id, key)
+);
+
+-- Replies that deserve an answer (interested, question, referral), with a suggested draft.
+CREATE TABLE IF NOT EXISTS replies (
+  id INTEGER PRIMARY KEY,
+  prospect_id INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  sender_id INTEGER REFERENCES senders(id) ON DELETE SET NULL,
+  gmail_message_id TEXT,
+  gmail_thread_id TEXT,
+  from_header TEXT NOT NULL DEFAULT '',
+  snippet TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL,
+  draft_subject TEXT NOT NULL DEFAULT '',
+  draft_body TEXT NOT NULL DEFAULT '',
+  draft_engine TEXT NOT NULL DEFAULT 'template',
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','sent','dismissed')),
+  received_at TEXT NOT NULL,
+  handled_at TEXT
+);
+
+-- Background jobs ("crons") run by the scheduler: last run and result, shown in Tareas.
+CREATE TABLE IF NOT EXISTS jobs (
+  name TEXT PRIMARY KEY,
+  last_run_at TEXT,
+  last_ok_at TEXT,
+  last_result TEXT,
+  last_error TEXT,
+  runs INTEGER NOT NULL DEFAULT 0
+);
+
 -- Decision center: recommendations computed from the results (what to change and why).
 -- A person approves or dismisses each one, unless they granted automatic permission for its type.
 CREATE TABLE IF NOT EXISTS recommendations (
@@ -323,6 +369,11 @@ const ADDED_COLUMNS = {
     max_contacts_per_company: 'INTEGER NOT NULL DEFAULT 3',
     company_gap_days: 'INTEGER NOT NULL DEFAULT 2',
     stop_on_company_reply: 'INTEGER NOT NULL DEFAULT 1',
+    // How prospects are clustered into message groups.
+    group_by: "TEXT NOT NULL DEFAULT 'industry_persona'",
+  },
+  brands: {
+    meeting_link: "TEXT NOT NULL DEFAULT ''",
   },
   steps: {
     channel: "TEXT NOT NULL DEFAULT 'email'",
@@ -330,6 +381,7 @@ const ADDED_COLUMNS = {
   variants: {
     segment_id: 'INTEGER REFERENCES segments(id) ON DELETE SET NULL',
     persona_id: 'INTEGER REFERENCES personas(id) ON DELETE SET NULL',
+    group_id: 'INTEGER REFERENCES message_groups(id) ON DELETE CASCADE',
     // active = in rotation; proposed = AI/challenger waiting for approval; paused = removed from A/B.
     status: "TEXT NOT NULL DEFAULT 'active'",
     origin: "TEXT NOT NULL DEFAULT 'manual'",
@@ -354,6 +406,7 @@ const ADDED_COLUMNS = {
     lead_status: "TEXT NOT NULL DEFAULT 'research'",
     lead_status_reasons: "TEXT NOT NULL DEFAULT ''",
     persona_id: 'INTEGER REFERENCES personas(id) ON DELETE SET NULL',
+    group_id: 'INTEGER REFERENCES message_groups(id) ON DELETE SET NULL',
   },
   drafts: {
     persona_id: 'INTEGER REFERENCES personas(id) ON DELETE SET NULL',

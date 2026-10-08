@@ -181,6 +181,7 @@ const CHANNEL_LABEL = { email: 'Correo', call: 'Llamada (cold call)', linkedin: 
 const OUTCOME_LABEL = { interested: 'Interesado', meeting: 'Reunión', opportunity: 'Oportunidad', won: 'Cierre ganado', lost: 'Perdido' };
 const VALIDATION_LABEL = { valid: 'Válido', risky: 'Riesgoso', invalid: 'Inválido' };
 const APPROVAL_LABEL = {
+  group: 'Por grupo (recomendado): apruebas una vez los mensajes de cada grupo; solo se detienen los correos con advertencias',
   first: 'Aprobar el primer correo de cada prospecto (y cualquiera con advertencias)',
   all: 'Aprobar todos los correos',
   issues: 'Aprobar solo los que tengan advertencias de calidad',
@@ -213,42 +214,39 @@ async function viewCampaigns() {
 }
 
 function defaultCampaign() {
+  // 2026 standards: plain text, short, no links or open tracking, 4 touches in ~2–3 weeks.
   const body = 'Hola {{first_name}},\n\n{{gancho}}\n\n{{problema}}\n\n{{cta}}';
   return {
     name: `Campaña ${new Date().toLocaleDateString('es')}`,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Panama',
-    approval_mode: 'all',
+    approval_mode: 'group',
+    group_by: 'industry_persona',
+    track_opens: false,
     segments: [],
     steps: [
-      { channel: 'email', variants: [
-        { label: 'A · Cargo', angle: 'Asunto centrado en el cargo de la persona', subject: 'pregunta sobre tu rol en {{company}}', body },
-        { label: 'B · Empresa', angle: 'Asunto centrado en la empresa', subject: 'idea para el equipo de {{company}}', body },
-      ] },
-      { channel: 'email', delay_days: 3, same_thread: true, variants: [{ label: 'Prueba social', angle: 'Resultado medible de un cliente parecido', subject: '', body: '{{first_name}}, por contexto: un equipo parecido al de {{company}} redujo a la mitad el tiempo de prospección en un mes.\n\n{{cta}}' }] },
-      { channel: 'call', delay_days: 2, variants: [{ label: 'Guion de llamada', body: 'Llamar a {{first_name}} ({{title}} en {{company}}). Referenciar el correo enviado. Objetivo: validar el problema y proponer 15 minutos.' }] },
-      { channel: 'email', delay_days: 4, same_thread: true, variants: [{ label: 'Cierre', angle: 'Cierre respetuoso y fácil de responder', subject: '', body: '{{first_name}}, no quiero llenar tu bandeja. Si no es prioridad ahora, lo dejo aquí.\n\n¿Lo retomamos más adelante?' }] },
+      { channel: 'email', variants: [{ label: 'Primer correo', angle: 'Contexto real + problema de su cargo + una pregunta', subject: 'pregunta sobre {{company}}', body }] },
+      { channel: 'email', delay_days: 3, same_thread: true, variants: [{ label: 'Seguimiento 1', angle: 'Otro ángulo del mismo problema', subject: '', body: 'Hola {{first_name}}, te escribo de nuevo por si mi correo se perdió.\n\nLo pregunto porque es un tema que suele aparecer justo cuando se planifica el próximo trimestre.\n\n{{cta}}' }] },
+      { channel: 'email', delay_days: 4, same_thread: true, variants: [{ label: 'Seguimiento 2', angle: 'Algo útil, sin presión', subject: '', body: '{{first_name}}, una idea corta: en empresas parecidas a {{company}} el primer paso suele ser revisar dónde se pierde más tiempo o dinero en este proceso.\n\n{{cta}}' }] },
+      { channel: 'email', delay_days: 5, same_thread: true, variants: [{ label: 'Cierre', angle: 'Cierre respetuoso y fácil de responder', subject: '', body: '{{first_name}}, no quiero llenar tu bandeja. Si no es prioridad ahora, lo dejo aquí.\n\n¿Lo retomamos más adelante?' }] },
     ],
     hooks: [
-      { label: 'Responsabilidad', description: 'Contexto real de su cargo y responsabilidad', text: 'Como {{title}} en {{company}}, imagino que buena parte de tu semana se va en coordinar al equipo y sus metas.' },
+      { label: 'Responsabilidad', description: 'Contexto real de su cargo y responsabilidad', text: 'Vi que en {{company}} trabajas como {{title}}.' },
     ],
     problems: [
-      { label: 'Prospección manual', description: 'El equipo pierde tiempo investigando leads a mano', text: 'En equipos parecidos vemos que se pierden varias horas por semana investigando prospectos a mano antes de cada contacto.' },
+      { label: 'Genérico', description: 'Se reemplaza por el problema del perfil de comprador cuando existe', text: 'En empresas parecidas vemos que este proceso consume más tiempo y dinero del que debería.' },
     ],
     ctas: [
-      { label: 'Interés', description: 'Baja fricción: solo confirmar interés. Para prospectos sin interacción.', text: '¿Tiene sentido que te comparta cómo lo resolvieron?' },
-      { label: 'Recurso', description: 'Ofrecer un recurso útil sin pedir reunión.', text: '¿Te envío un resumen de una página?' },
-      { label: 'Llamada', description: 'Pedido directo de reunión corta. Solo para prospectos que abrieron varias veces o encajan muy bien.', text: '¿Te parece si lo vemos 15 minutos esta semana?' },
+      { label: 'Interés', description: 'Baja fricción: solo confirmar interés.', text: '¿Tiene sentido que lo conversemos?' },
     ],
   };
 }
+const TABS = [['groups', 'Grupos y mensajes'], ['prospects', 'Prospectos'], ['rules', 'Reglas de envío'], ['settings', 'Configuración'], ['results', 'Resultados']];
+// Advanced screens (templates, personalization library, per-email approval, A/B), kept for fine control.
+const ADVANCED_TABS = [['sequence', 'Plantillas base'], ['library', 'Personalización'], ['approval', 'Aprobación por correo'], ['ab', 'Pruebas A/B']];
 
-// ---------------------------------------------------------------------------
-// Campaign detail (tabs)
-// ---------------------------------------------------------------------------
-const TABS = [['sequence', 'Secuencia'], ['library', 'Personalización'], ['settings', 'Configuración'], ['rules', 'Reglas de envío'], ['prospects', 'Prospectos'], ['approval', 'Aprobación'], ['ab', 'Pruebas A/B'], ['results', 'Resultados']];
-
-async function viewCampaign(id, tab = 'sequence') {
+async function viewCampaign(id, tabArg) {
   const [{ campaign, readiness }, { senders }, { brands }] = await Promise.all([api(`/campaigns/${id}`), api('/senders'), api('/brands')]);
+  const tab = tabArg || (campaign.approval_mode === 'group' ? 'groups' : 'sequence');
   const canRun = campaign.status !== 'active';
   const s = campaign.stats;
   app.innerHTML = `
@@ -263,7 +261,8 @@ async function viewCampaign(id, tab = 'sequence') {
     </div>
     ${readiness.problems.length ? `<div class="notice"><b>Antes de activar:</b><ul>${readiness.problems.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></div>` : ''}
     ${readiness.recommendations.length ? `<details class="notice info"><summary>${readiness.recommendations.length} recomendación(es)</summary><ul>${readiness.recommendations.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>` : ''}
-    <div class="tabs">${TABS.map(([k, l]) => `<button data-tab="${k}" class="${tab === k ? 'active' : ''}">${l}${k === 'approval' && s.pending_approval ? ` <span class="badge warn">${s.pending_approval}</span>` : ''}</button>`).join('')}</div>
+    <div class="tabs">${TABS.map(([k, l]) => `<button data-tab="${k}" class="${tab === k ? 'active' : ''}">${l}</button>`).join('')}
+      <span class="tabs-sep">Avanzado:</span>${ADVANCED_TABS.map(([k, l]) => `<button data-tab="${k}" class="adv ${tab === k ? 'active' : ''}">${l}${k === 'approval' && s.pending_approval ? ` <span class="badge warn">${s.pending_approval}</span>` : ''}</button>`).join('')}</div>
     <div id="tab"></div>`;
   $$('[data-tab]').forEach((b) => b.addEventListener('click', () => { location.hash = `#/campaigns/${id}/${b.dataset.tab}`; }));
   $('#toggle-status').addEventListener('click', (e) => guard(e.currentTarget, async () => {
@@ -290,6 +289,7 @@ async function viewCampaign(id, tab = 'sequence') {
   if (tab === 'prospects') return renderProspects(el, campaign);
   if (tab === 'approval') return renderApproval(el, campaign);
   if (tab === 'results') return renderResults(el, campaign);
+  if (tab === 'groups') return renderGroups(el, campaign);
   return renderSequence(el, campaign);
 }
 
@@ -299,7 +299,7 @@ function campaignPayload(c) {
     name: c.name, offer: c.offer, icp: c.icp, timezone: c.timezone, send_days: c.send_days,
     window_start: c.window_start, window_end: c.window_end, track_opens: c.track_opens,
     include_unsubscribe: c.include_unsubscribe, jev_enabled: c.jev_enabled, stop_on_reply: c.stop_on_reply,
-    approval_mode: c.approval_mode, sender_ids: c.sender_ids, brand_id: c.brand_id || null,
+    approval_mode: c.approval_mode, group_by: c.group_by || 'industry_persona', sender_ids: c.sender_ids, brand_id: c.brand_id || null,
     schedule: c.schedule, max_per_day: Number(c.max_per_day), delay_minutes: Number(c.delay_minutes),
     max_contacts_per_company: Number(c.max_contacts_per_company), company_gap_days: Number(c.company_gap_days),
     stop_on_company_reply: Boolean(c.stop_on_company_reply),
@@ -941,13 +941,154 @@ async function renderResults(el, campaign) {
 }
 
 // ---------------------------------------------------------------------------
-// Tasks (cold call / LinkedIn)
+// Groups (clusters) and their messages: approve once per group
 // ---------------------------------------------------------------------------
+const GROUP_STATUS = { new: ['Sin mensajes', 'warn'], pending: ['Por aprobar', 'warn'], approved: ['Aprobado · enviando', 'ok'], paused: ['Pausado', ''] };
+
+async function renderGroups(el, campaign) {
+  const data = await api(`/campaigns/${campaign.id}/groups`);
+  const stepTitle = (m) => (m.step_number === 1 ? 'Primer correo' : `Seguimiento ${m.step_number - 1} · ${m.delay_days} día(s) después${m.same_thread ? ' · mismo hilo' : ''}`);
+  el.innerHTML = `
+    ${campaign.approval_mode !== 'group' ? `<div class="notice">Modo de aprobación actual: «${esc(APPROVAL_LABEL[campaign.approval_mode] || campaign.approval_mode)}». Para aprobar una sola vez por grupo, cambia el modo de aprobación a <b>Por grupo</b> en Configuración.</div>` : ''}
+    <div class="card">
+      <div class="row between">
+        <div><h2>Grupos de prospectos</h2>
+          <p class="muted small">Al cargar la base, cada lead se agrupa automáticamente. Cada grupo tiene sus propios mensajes en escritura simple: los revisas, los editas y <b>apruebas una vez</b>; a partir de ahí se envían solos, por empresa y cumpliendo tus reglas de envío.</p></div>
+        <div class="row">
+          <label class="small" for="g-by" style="margin:0">Agrupar por</label>
+          <select id="g-by" style="width:auto">${Object.entries(data.options).map(([k, l]) => `<option value="${k}" ${data.group_by === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+          <button class="btn ghost small" id="g-merge">Unir seleccionados</button>
+        </div>
+      </div>
+      <p class="small muted">${data.openai ? '✨ Los mensajes se escriben con IA para la industria y el perfil de cada grupo.' : 'Sin OpenAI, cada grupo parte de las plantillas base (Avanzado → Plantillas base). Configura OpenAI en Integraciones para que se escriban por grupo.'}</p>
+    </div>
+    ${data.groups.map((g) => {
+      const [stLabel, stClass] = GROUP_STATUS[g.status] || [g.status, ''];
+      const hasMessages = g.messages.some((m) => m.variants.length);
+      const hasProposed = g.messages.some((m) => m.variants.some((v) => v.status === 'proposed'));
+      return `<div class="card group-card" data-group="${g.id}">
+        <div class="row between">
+          <div class="row"><input type="checkbox" data-merge="${g.id}" aria-label="Seleccionar para unir">
+            <input type="text" class="group-label" value="${esc(g.label)}" aria-label="Nombre del grupo">
+            <span class="badge ${stClass}">${stLabel}</span>${hasProposed && g.status === 'approved' ? '<span class="badge warn">Cambios por aprobar</span>' : ''}</div>
+          <div class="small muted">${g.ready} aptos · ${g.research} por investigar · ${g.companies} empresas · ${g.sent} enviados · ${g.replied} respuestas · ${g.meetings} reuniones</div>
+        </div>
+        ${hasMessages ? g.messages.map((m) => {
+          const shown = m.variants.filter((v) => v.status === 'proposed').length ? m.variants.filter((v) => v.status === 'proposed') : m.variants;
+          return `<div class="group-step"><h3>${stepTitle(m)}</h3>${shown.map((v) => `
+            <div class="variant ${v.status === 'proposed' ? 'variant-proposed' : ''}" data-vid="${v.id}">
+              ${v.rationale ? `<p class="small muted">${v.origin === 'ai' ? '✨ ' : ''}${esc(v.rationale)}</p>` : ''}
+              ${m.step_number === 1 || !m.same_thread ? `<label class="small">Asunto</label><input type="text" data-f="subject" value="${esc(v.subject)}">` : ''}
+              <label class="small" style="margin-top:6px">Mensaje</label><textarea data-f="body" rows="7" style="font-family:inherit;font-size:14px">${esc(v.body)}</textarea>
+              ${issuesHtml(v.issues, 'Cumple las reglas de escritura')}
+              ${v.preview ? `<details class="group-preview" ${v.body.includes('{{') ? 'open' : ''}><summary class="small">Así lo leerá ${esc(v.preview.to)}${v.preview.company ? ` (${esc(v.preview.company)})` : ''}</summary>
+                ${v.preview.subject && (m.step_number === 1 || !m.same_thread) ? `<p class="small"><b>Asunto:</b> ${esc(v.preview.subject)}</p>` : ''}
+                <div class="preview-mail small">${esc(v.preview.body)}</div>
+                ${v.preview.missing.length ? `<p class="small" style="color:var(--bad)">Faltan datos: ${esc(v.preview.missing.join(', '))}</p>` : ''}</details>` : ''}
+            </div>`).join('') || '<p class="muted small">Falta el mensaje de este paso: genera los mensajes.</p>'}</div>`;
+        }).join('') : '<p class="muted">Este grupo aún no tiene mensajes.</p>'}
+        <div class="row" style="margin-top:10px">
+          <button class="btn ghost small" data-g-act="generate">${hasMessages ? '↻ Proponer de nuevo' : '✨ Generar mensajes'}</button>
+          ${hasMessages ? '<button class="btn ghost small" data-g-act="save">Guardar cambios</button>' : ''}
+          ${hasMessages && (g.status !== 'approved' || hasProposed) ? '<button class="btn ok small" data-g-act="approve">Aprobar grupo</button>' : ''}
+          ${g.status === 'approved' ? '<button class="btn ghost small" data-g-act="pause">Pausar</button>' : ''}
+          ${g.status === 'paused' ? '<button class="btn ghost small" data-g-act="resume">Reanudar</button>' : ''}
+        </div>
+      </div>`;
+    }).join('') || '<div class="card empty">Aún no hay grupos: importa tu base en Prospectos y la plataforma los crea al analizar los leads (unos segundos).</div>'}`;
+
+  const collect = (card) => ({
+    label: $('.group-label', card).value.trim(),
+    messages: $$('[data-vid]', card).map((v) => ({ id: Number(v.dataset.vid), subject: $('[data-f="subject"]', v)?.value || '', body: $('[data-f="body"]', v).value })),
+  });
+  $('#g-by').addEventListener('change', (e) => guard(e.target, async () => {
+    await api(`/campaigns/${campaign.id}/groups/regroup`, { method: 'POST', body: { group_by: e.target.value } });
+    toast('Leads reagrupados');
+    renderGroups(el, campaign);
+  }));
+  $('#g-merge').addEventListener('click', (e) => guard(e.currentTarget, async () => {
+    const ids = $$('[data-merge]:checked').map((c) => Number(c.dataset.merge));
+    if (ids.length < 2) return toast('Selecciona al menos dos grupos para unirlos');
+    const firstLabel = $(`[data-group="${ids[0]}"] .group-label`).value;
+    const label = prompt('Nombre del grupo unido:', firstLabel);
+    if (label === null) return undefined;
+    await api(`/campaigns/${campaign.id}/groups/merge`, { method: 'POST', body: { target_id: ids[0], source_ids: ids.slice(1), label: label.trim() || firstLabel } });
+    toast('Grupos unidos: los leads nuevos de esos grupos también llegarán aquí');
+    return renderGroups(el, campaign);
+  }));
+  $$('[data-group]').forEach((card) => {
+    const id = card.dataset.group;
+    $$('[data-g-act]', card).forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+      const act = b.dataset.gAct;
+      if (act === 'generate') {
+        b.textContent = 'Escribiendo…';
+        const r = await api(`/groups/${id}/generate`, { method: 'POST' });
+        toast(r.engine === 'ai' ? 'Mensajes propuestos con IA: revísalos y aprueba el grupo' : 'Mensajes creados desde las plantillas base');
+      } else if (act === 'save' || act === 'approve') {
+        await api(`/groups/${id}`, { method: 'PUT', body: collect(card) });
+        if (act === 'approve') {
+          await api(`/groups/${id}/approve`, { method: 'POST' });
+          toast('Grupo aprobado: sus correos se enviarán según tus reglas');
+        } else toast('Cambios guardados');
+      } else {
+        await api(`/groups/${id}/${act}`, { method: 'POST' });
+        toast(act === 'pause' ? 'Grupo pausado' : 'Grupo reanudado');
+      }
+      refreshDecisionCount();
+      renderGroups(el, campaign);
+    })));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Tareas: the single inbox where the platform asks for permission
+// ---------------------------------------------------------------------------
+const REPLY_GOAL = { interested: 'Interesado', question: 'Pregunta', referral: 'Referido' };
+
 async function viewTasks() {
-  const { tasks, outcomes } = await api('/tasks?status=open');
+  const [inbox, { tasks, outcomes }, { jobs }] = await Promise.all([api('/inbox'), api('/tasks?status=open'), api('/jobs')]);
+  const c = inbox.counts;
+  const section = (title, n, html, empty) => `<h2 class="inbox-h">${title} ${n ? `<span class="badge warn">${n}</span>` : ''}</h2>${html || `<p class="muted small inbox-empty">${empty}</p>`}`;
+  const typeLabel = (t) => inbox.types[t]?.label || 'Aviso';
   app.innerHTML = `
-    <h1>Tareas</h1><p class="muted">Pasos de llamada y LinkedIn de tus secuencias. Al completarlas, la secuencia continúa; una reunión agendada o un "no interesado" la detienen.</p>
-    ${tasks.map((t) => `
+    <div class="row between"><div><h1>Tareas</h1><p class="muted">Todo lo que necesita tu permiso está aquí. La plataforma trabaja sola y te pide aprobación antes de cambiar mensajes o responder.</p></div>
+      <a class="small" href="#/decisions">Permisos de automatización e historial →</a></div>
+    <div class="grid4 kpis">
+      <div class="stat"><span>Grupos por aprobar</span><b>${c.groups}</b></div>
+      <div class="stat"><span>Respuestas por contestar</span><b>${c.replies}</b></div>
+      <div class="stat"><span>Cambios sugeridos</span><b>${c.changes}</b></div>
+      <div class="stat"><span>Correos por revisar</span><b>${c.drafts}</b></div>
+    </div>
+
+    ${section('Respuestas por contestar', c.replies, inbox.replies.map((r) => `
+      <div class="card reply-card" data-reply="${r.id}">
+        <div class="row between"><div class="row"><span class="badge ok">${esc(REPLY_GOAL[r.category] || r.category)}</span><b>${esc([r.first_name, r.last_name].filter(Boolean).join(' ') || r.email)}</b>
+          <span class="small muted">${esc(r.title || '')}${r.company ? ` · ${esc(r.company)}` : ''}${r.persona ? ` · ${esc(r.persona)}` : ''}</span></div>
+          <span class="small muted">${esc(r.campaign)} · ${fmtDate(r.received_at)}</span></div>
+        <blockquote class="reply-quote">${esc(r.snippet)}</blockquote>
+        <label class="small">Tu respuesta ${r.draft_engine === 'ai' ? '(sugerida con IA)' : '(sugerida)'} · se envía en el mismo hilo con tu firma</label>
+        <textarea data-reply-body rows="6" style="font-family:inherit;font-size:14px">${esc(r.draft_body)}</textarea>
+        <div class="row" style="margin-top:8px"><button class="btn ok small" data-r-act="send">Enviar respuesta</button><button class="btn ghost small" data-r-act="redraft">✨ Redactar con IA</button><button class="btn ghost small" data-r-act="dismiss">Ya la atendí</button></div>
+      </div>`).join(''), 'Nadie ha respondido todavía. Cuando alguien conteste, verás aquí su respuesta y un borrador para contestarle.')}
+
+    ${section('Grupos por aprobar', c.groups, inbox.groups.map((g) => `
+      <div class="card row between"><div><b>${esc(g.label)}</b> <span class="small muted">· ${esc(g.campaign)} · ${g.ready} lead(s) aptos</span><br>
+        <span class="small">${g.proposed ? `${g.proposed} mensaje(s) propuestos esperan tu aprobación` : 'Aún no tiene mensajes'}${g.approval_mode !== 'group' ? ' <span class="muted">(la campaña no está en modo por grupo)</span>' : ''}</span></div>
+        <a class="btn small" href="#/campaigns/${g.campaign_id}/groups">${g.proposed ? 'Revisar y aprobar' : 'Generar mensajes'}</a></div>`).join(''), 'No hay grupos esperando.')}
+
+    ${section('Cambios sugeridos', c.changes, inbox.changes.map((r) => `
+      <div class="card rec sev-${r.severity}">
+        <div class="row between"><div class="row"><span class="badge ${SEVERITY[r.severity]?.[1] || ''}">${severityIcon(r.severity)} ${SEVERITY[r.severity]?.[0] || ''}</span><span class="badge">${esc(typeLabel(r.type))}</span></div><span class="small muted">${fmtDate(r.created_at)}</span></div>
+        <h3>${esc(r.title)}</h3><p>${esc(r.reason)}</p>${evidenceHtml(r)}
+        <div class="row"><button class="btn ok small" data-rec-approve="${r.id}">Aprobar y aplicar</button><button class="btn ghost small" data-rec-dismiss="${r.id}">Descartar</button></div>
+      </div>`).join(''), 'Sin cambios sugeridos por ahora. Cada hora se revisan los resultados.')}
+
+    ${section('Correos por revisar', c.drafts, inbox.drafts.map((d) => `
+      <div class="card row between"><div><b>${esc(d.campaign)}</b> <span class="small muted">· ${d.pending} correo(s)${d.with_errors ? ` · ${d.with_errors} con errores` : ''}</span><br>
+        <span class="small muted">Se detuvieron por advertencias de calidad (por ejemplo, argumento repetido en la misma empresa) o porque la campaña aprueba correo por correo.</span></div>
+        <a class="btn small" href="#/campaigns/${d.campaign_id}/approval">Revisar</a></div>`).join(''), 'No hay correos detenidos.')}
+
+    ${section('Llamadas y LinkedIn', tasks.length, tasks.map((t) => `
       <div class="card" data-task="${t.id}">
         <div class="row between"><div><span class="badge">${esc(CHANNEL_LABEL[t.channel])}</span> <b>${esc([t.first_name, t.last_name].filter(Boolean).join(' ') || t.email)}</b> · <span class="muted small">${esc(t.title)} ${t.company ? `en ${esc(t.company)}` : ''}</span></div>
           <span class="small muted">${esc(t.campaign_name)} · paso ${t.step_number} · ${fmtDate(t.created_at)}</span></div>
@@ -959,14 +1100,82 @@ async function viewTasks() {
           <button class="btn small" data-act="done">Completar</button>
           <button class="btn ghost small" data-act="skip">Omitir</button>
         </div>
-      </div>`).join('') || '<div class="card empty">No hay tareas pendientes.</div>'}`;
+      </div>`).join(''), 'No hay llamadas ni contactos de LinkedIn pendientes.')}
+
+    ${inbox.alerts.length ? section('Avisos', inbox.alerts.length, inbox.alerts.map((r) => `
+      <div class="card rec sev-${r.severity}"><h3>${severityIcon(r.severity)} ${esc(r.title)}</h3><p class="small">${esc(r.reason)}</p>
+        <button class="btn ghost small" data-rec-dismiss="${r.id}">Entendido</button></div>`).join(''), '') : ''}
+
+    <div class="card">
+      <div class="row between"><h2>Automatizaciones (crons)</h2><button class="btn ghost small" id="run-jobs">Ejecutar ahora</button></div>
+      <p class="small muted">Corren solas en el servidor cada ${esc(String(meta.scheduler_seconds || 30))} segundos y respetan las reglas de envío de cada campaña. Una campaña pausada o un grupo sin aprobar no envía nada.</p>
+      ${dataTable(['Tarea', 'Frecuencia', 'Última ejecución', 'Resultado'], jobs.map((j) => [
+        `<b>${esc(j.label)}</b><br><span class="small muted">${esc(j.help)}</span>`,
+        `<span class="small">${esc(j.every)}</span>`,
+        `<span class="small">${j.last_run_at ? fmtDate(j.last_run_at) : 'aún no corre'}</span>`,
+        j.last_error ? `<span class="badge bad">Error</span> <span class="small">${esc(j.last_error)}</span>` : `<span class="small">${esc(jobResult(j))}</span>`,
+      ]))}
+    </div>`;
+
+  const reload = () => { refreshDecisionCount(); viewTasks(); };
+  $$('[data-reply]').forEach((card) => {
+    const id = card.dataset.reply;
+    $$('[data-r-act]', card).forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+      const act = b.dataset.rAct;
+      const body = $('[data-reply-body]', card).value;
+      if (act === 'send') {
+        await api(`/replies/${id}/send`, { method: 'POST', body: { body } });
+        toast('Respuesta enviada en el hilo');
+        return reload();
+      }
+      if (act === 'redraft') {
+        b.textContent = 'Escribiendo…';
+        const r = await api(`/replies/${id}/redraft`, { method: 'POST' });
+        $('[data-reply-body]', card).value = r.body;
+        b.textContent = '✨ Redactar con IA';
+        return undefined;
+      }
+      await api(`/replies/${id}/dismiss`, { method: 'POST' });
+      return reload();
+    })));
+    $('[data-reply-body]', card).addEventListener('change', (e) => api(`/replies/${id}`, { method: 'PATCH', body: { body: e.target.value } }).catch(() => {}));
+  });
+  $$('[data-rec-approve]').forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+    const r = await api(`/decisions/${b.dataset.recApprove}/approve`, { method: 'POST' });
+    toast(r.result);
+    reload();
+  })));
+  $$('[data-rec-dismiss]').forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+    await api(`/decisions/${b.dataset.recDismiss}/dismiss`, { method: 'POST' });
+    reload();
+  })));
   $$('[data-task]').forEach((card) => {
     $$('[data-act]', card).forEach((b) => b.addEventListener('click', () => guard(b, async () => {
       await api(`/tasks/${card.dataset.task}/complete`, { method: 'POST', body: { outcome: $('[data-outcome]', card).value, note: $('[data-note]', card).value, skip: b.dataset.act === 'skip' } });
-      card.remove();
       toast('Tarea cerrada');
+      reload();
     })));
   });
+  $('#run-jobs').addEventListener('click', (e) => guard(e.currentTarget, async () => {
+    const r = await api('/scheduler/run', { method: 'POST' });
+    toast(r.skipped ? 'Ya se están ejecutando' : `Listo: ${r.analyzed} analizados · ${r.sent} enviados`);
+    reload();
+  }));
+}
+
+function jobResult(j) {
+  if (!j.last_result) return '—';
+  try {
+    const r = JSON.parse(j.last_result);
+    if (j.name === 'send') return `${r} correo(s) enviados en la última ejecución`;
+    if (j.name === 'analyze') return `${r} lead(s) analizados`;
+    if (j.name === 'replies') return `${r?.checked ?? 0} hilo(s) revisados`;
+    if (j.name === 'reply_drafts') return `${r} borrador(es) mejorados`;
+    if (j.name === 'decisions') return `${r?.open ?? 0} pendientes · ${r?.auto_applied ?? 0} aplicadas solas`;
+    return String(r);
+  } catch {
+    return j.last_result;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1241,6 +1450,7 @@ function brandForm(b) {
       <div class="grid2">${field('name', 'Nombre de la marca', { placeholder: 'Previsio' })}${field('website', 'Sitio web', { placeholder: 'https://…' })}</div>
       ${field('value_proposition', 'Propuesta de valor', { area: true, placeholder: 'Qué resolvemos, para quién y con qué resultado medible' })}
       <div class="grid2">${field('tone', 'Tono', { placeholder: 'Cercano, consultivo, sin tecnicismos' })}${field('avoid', 'Nunca decir', { placeholder: 'gratis, garantizado, revolucionario' })}</div>
+      ${field('meeting_link', 'Enlace de agenda (opcional) — se usa al responder a interesados', { placeholder: 'https://calendar.app.google/… o https://calendly.com/…' })}
     </div>
     ${BRAND_FIELDS.map((f) => `<div class="card brand-q">
       <div class="brand-q-num">${f.n}</div>
@@ -1416,10 +1626,10 @@ const fmtDay = (d) => new Date(`${d}T12:00:00Z`).toLocaleDateString('es', { day:
 
 async function refreshDecisionCount() {
   try {
-    const { open } = await api('/decisions/count');
-    const el = $('#decisions-count');
-    el.textContent = open;
-    el.hidden = !open;
+    const { total } = await api('/inbox/count');
+    const el = $('#tasks-count');
+    el.textContent = total;
+    el.hidden = !total;
   } catch { /* not logged in */ }
 }
 
@@ -1546,7 +1756,7 @@ async function viewAnalytics() {
       <span class="small muted">Fechas en ${esc(VIEWER_TZ)}</span>
     </div>
     ${decisions.open.length ? `<div class="notice info decision-strip"><b>${decisions.open.length} recomendación(es) para mejorar tus resultados</b>
-      <ul>${decisions.open.slice(0, 3).map((r) => `<li>${severityIcon(r.severity)} ${esc(r.title)}</li>`).join('')}</ul><a href="#/decisions">Revisar y aprobar en Decisiones →</a></div>` : ''}
+      <ul>${decisions.open.slice(0, 3).map((r) => `<li>${severityIcon(r.severity)} ${esc(r.title)}</li>`).join('')}</ul><a href="#/tasks">Revisar y aprobar en Tareas →</a></div>` : ''}
     <div class="grid4 kpis">
       ${kpiTile('Enviados', k.sent, p.sent, { sub: `${fmtNum(k.contacted)} personas contactadas` })}
       ${kpiTile('Tasa de apertura', k.open_rate, p.open_rate, { rate: true, sub: `${fmtNum(k.opened)} correos abiertos · ${fmtNum(k.opens_total)} aperturas` })}

@@ -87,6 +87,16 @@ Sin clave de Jev, 1–3 se responden por coincidencia de palabras clave y, ante 
 
 **Empresas.** Los leads se agrupan por dominio corporativo (o nombre). La vista *Empresas* muestra el estado de cada cuenta y sus contactos en todas las campañas. Reglas por campaña: máximo de contactos por empresa (por defecto 3; el resto queda en reserva), días entre el primer correo a colegas y detener a los colegas cuando alguien de la empresa responde.
 
+## Flujo simple: grupos, aprobación una vez y Tareas
+
+1. **Cargas la base** (CSV/Excel) en *Prospectos*. Cada lead se valida, se analiza y entra a un **grupo** automático (por defecto *industria × perfil*, p. ej. "Retail · Director Financiero"). El criterio se cambia en *Grupos y mensajes* (perfil, industria, segmento o un solo grupo) y puedes **unir** grupos.
+2. **Mensajes por grupo**: *✨ Generar mensajes* escribe primer correo y seguimientos en escritura simple para la industria y el perfil del grupo (con OpenAI; sin OpenAI parte de las *Plantillas base*). Ves cómo lo leerá un prospecto real, editas y **apruebas el grupo una vez**.
+3. **Envío por empresa**: modo de aprobación *Por grupo*. Solo se envía a grupos aprobados, por empresa (2–3 contactos escalonados, cada uno con el argumento de su perfil) y dentro de tus reglas de envío. Los correos con advertencias (p. ej. argumento repetido en la misma empresa) se detienen para revisión.
+4. **Tareas = bandeja única**: respuestas por contestar (con borrador sugerido que envías en el mismo hilo), grupos por aprobar, cambios sugeridos por los resultados (asunto, cuerpo, ventana, límites), correos detenidos, llamadas/LinkedIn y avisos.
+5. **Automatizaciones (crons)**: el servidor corre cada 30 s *Revisar respuestas*, *Redactar respuestas con IA*, *Analizar leads* y *Preparar y enviar correos*, y cada hora *Analizar resultados y proponer cambios*. Tareas muestra la última ejecución y el resultado de cada uno.
+
+Estándares por defecto en campañas nuevas: texto plano corto, sin enlaces en el primer correo, **sin pixel de aperturas** (en 2026 es una señal poco fiable y perjudica la entrega), baja de un clic, 4 toques en ~2–3 semanas y detener toda la cuenta cuando alguien responde. En *Marcas* puedes guardar tu **enlace de agenda**, que se usa al responder a interesados.
+
 ## Perfiles de comprador: un argumento por cargo
 
 Un Demand Planner, un gerente de Supply Chain y un director financiero pueden ser clientes en la misma empresa, pero los mueven cosas distintas. En **Marcas → 5. Perfiles de comprador** defines cada perfil (o cargas los sugeridos para planificación de demanda): cargos que lo identifican, qué le importa, su problema en su lenguaje, cómo le ayuda la marca, prueba, pedido acorde a su nivel y qué evitar.
