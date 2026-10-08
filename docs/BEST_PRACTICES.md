@@ -19,6 +19,21 @@ Resumen de la investigación usada para diseñar la herramienta. Cada práctica 
 | Escribir como colega, no como marketer. Texto plano, sin HTML pesado. | Clay, Instantly | Cuerpo en texto plano → HTML mínimo (`src/lib/template.js`) |
 | Evitar palabras spam ("gratis", "garantizado", "urgente"…) y > 1 link; sin imágenes/adjuntos al inicio. | Lemlist, Instantly, Clay | `quality.js` (`hype`, `subject_hype`, `links_first_email`, `links`) |
 
+## 1b. Un argumento por cargo (reglas de oro)
+
+En una misma empresa pueden comprar un Demand Planner, un gerente de Supply Chain y un director financiero, pero cada uno tiene una motivación distinta. Mandarles el mismo correo desperdicia la cuenta: el mensaje solo le habla a uno de ellos y, si lo comparan, resta credibilidad.
+
+1. **Una persona, un argumento**: el correo responde a la motivación del cargo, no a las funciones del producto.
+2. **Mismo problema, distinto ángulo**: Planner → precisión del pronóstico y horas manuales; Supply Chain → nivel de servicio, faltantes e inventario; Finanzas → capital de trabajo, margen y riesgo; Dirección → alineación entre áreas y rentabilidad.
+3. **Nunca el mismo correo en la misma cuenta**: la plataforma compara cada primer correo con los que ya recibieron sus colegas (similitud ≥60% = error, va a revisión) y no repite la variante que usó un colega.
+4. **El lenguaje del rol**: operativos, detalle concreto; directivos, impacto en negocio, más breve y sin jerga.
+5. **Un pedido acorde al nivel**: directivos, una pregunta de bajo esfuerzo ("¿tiene sentido?" o "¿quién de tu equipo?"); operativos, algo más concreto (ver una muestra).
+6. **Escalonar la cuenta**: 2–3 contactos por empresa, separados por días; empezar por quien sufre el problema.
+7. **Si uno responde, la cuenta se detiene**.
+8. **No mencionar colegas en frío**.
+
+Implementación: *Marcas → 5. Perfiles de comprador* (cargos que lo identifican, motivación, problema → `{{problema}}`, argumento, prueba, pedido → `{{cta}}`, qué evitar). Cada lead se asigna a un perfil por su cargo (palabras clave y, si no hay coincidencia, Jev); sin perfil queda en *Requiere investigación*. Las variantes pueden escribirse para un perfil y la IA redacta para el perfil elegido.
+
 ## 2. Secuencia y follow-ups
 
 | Práctica | Fuente | Dónde se aplica |

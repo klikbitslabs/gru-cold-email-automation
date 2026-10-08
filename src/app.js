@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import { z } from 'zod';
 import { config } from './config.js';
 import { lintTemplate } from './lib/quality.js';
+import { GOLDEN_RULES } from './lib/personas.js';
 import { LAWFUL_BASES } from './lib/validate.js';
 import { requireAuth } from './middleware/auth.js';
 import { adminRoutes } from './routes/admin.js';
@@ -73,6 +74,7 @@ export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, genera
       base_url: config.baseUrl,
       allow_registration: config.allowRegistration,
       lawful_bases: LAWFUL_BASES,
+      golden_rules: GOLDEN_RULES,
     });
   });
 

@@ -11,6 +11,7 @@ import { nowIso } from '../db.js';
 import { decrypt, randomToken } from '../lib/crypto.js';
 import { buildMime, formatAddress, toBase64Url } from '../lib/mime.js';
 import { classifyLead } from '../lib/leads.js';
+import { matchPersona, similarity, stripPersonal } from '../lib/personas.js';
 import { checkDraft } from '../lib/quality.js';
 import { allFieldsPresent, buildEmailBody, prospectVariables, renderTemplate, templateFields } from '../lib/template.js';
 import { addDays, inSendWindow, localParts, nextLocalSlot } from '../lib/time.js';
@@ -137,12 +138,67 @@ export function candidatesFor(db, { campaign, prospect, step, sender }) {
   const hooks = segmentItems(snippets.filter((s) => s.kind === 'hook')).filter((h) => allFieldsPresent(h.text, vars));
   const problems = segmentItems(snippets.filter((s) => s.kind === 'problem'));
   const preview = (s) => ({ ...s, preview: renderTemplate(s.text, vars).text });
+  const persona = prospect.persona_id ? db.prepare('SELECT * FROM personas WHERE id = ?').get(prospect.persona_id) : null;
+  // The persona's own problem and ask replace the generic ones: same company, different motivation.
+  const personaProblem = persona?.problem?.trim()
+    ? [{ id: PERSONA_SNIPPET_ID, kind: 'problem', persona: true, label: `Perfil: ${persona.name}`, description: persona.motivation, text: persona.problem }]
+    : null;
+  const personaCta = persona?.cta?.trim()
+    ? [{ id: PERSONA_SNIPPET_ID, persona: true, label: `Perfil: ${persona.name}`, description: persona.motivation, text: persona.cta }]
+    : null;
   return {
-    variants: forSegment(step.variants.filter((v) => (v.status || 'active') === 'active'), prospect.segment_id),
+    persona,
+    variants: forPersona(forSegment(step.variants.filter((v) => (v.status || 'active') === 'active'), prospect.segment_id), persona?.id),
     hooks: hooks.map(preview),
-    problems: problems.map(preview),
-    ctas: db.prepare('SELECT * FROM ctas WHERE campaign_id = ? ORDER BY id').all(campaign.id),
+    problems: (personaProblem || problems).map(preview),
+    ctas: personaCta || db.prepare('SELECT * FROM ctas WHERE campaign_id = ? ORDER BY id').all(campaign.id),
   };
+}
+
+const storedId = (snippet) => (snippet && snippet.id > 0 ? snippet.id : null);
+
+/** Id given to the persona's own problem/CTA (not stored as snippets; saved as NULL). */
+export const PERSONA_SNIPPET_ID = -1;
+
+/**
+ * Variants for this buyer persona: written for them when they exist, else generic ones.
+ * Variants written for another persona are a last resort (flagged by quality control).
+ */
+export function forPersona(items, personaId) {
+  const specific = items.filter((i) => personaId && i.persona_id === personaId);
+  if (specific.length) return specific;
+  const generic = items.filter((i) => !i.persona_id);
+  return generic.length ? generic : items;
+}
+
+/**
+ * Golden rules at account level: the argument must fit the person's role and must not repeat
+ * what a colleague at the same company already received.
+ */
+export function argumentIssues({ persona, variant, problem, body, stepNumber, colleagues }) {
+  const issues = [];
+  const usesProblem = /\{\{\s*problema/.test(variant.body || '');
+  if (persona && variant.persona_id && variant.persona_id !== persona.id) {
+    issues.push({ severity: 'error', code: 'other_persona', message: `La variante "${variant.label}" está escrita para otro perfil; ${persona.name} necesita su propio argumento.` });
+  } else if (persona && variant.persona_id !== persona.id && !(usesProblem && problem?.persona)) {
+    issues.push({ severity: 'warning', code: 'generic_argument', message: `Mensaje genérico para un perfil ${persona.name}: usa {{problema}} o crea una variante para este perfil (${persona.motivation || 'su motivación'}).` });
+  }
+  const mine = stripPersonal(body, colleagues);
+  for (const c of colleagues) {
+    if (c.step_number !== stepNumber) continue;
+    const sim = similarity(mine, stripPersonal(c.body_text, colleagues));
+    if (sim >= 0.6) {
+      issues.push({
+        severity: stepNumber === 1 ? 'error' : 'warning',
+        code: 'same_argument',
+        message: `Argumento casi idéntico (${Math.round(sim * 100)}%) al que recibió ${c.first_name || c.email}${c.title ? ` (${c.title})` : ''} de la misma empresa. Adáptalo a la motivación de este cargo.`,
+      });
+      break;
+    }
+  }
+  const named = colleagues.find((c) => c.first_name && c.last_name && body.includes(`${c.first_name} ${c.last_name}`));
+  if (named) issues.push({ severity: 'warning', code: 'mentions_colleague', message: `Menciona a ${named.first_name} ${named.last_name}, colega de la misma empresa: evita nombrar a otras personas en frío.` });
+  return issues;
 }
 
 export function needsApproval(mode, stepNumber, quality) {
@@ -193,8 +249,16 @@ export function verifiableData(db, campaign, prospect) {
 export async function analyzeAndClassify(db, prospect, campaign, { analyzeFn = analyzeProspect, now = () => new Date() } = {}) {
   const segments = db.prepare('SELECT * FROM segments WHERE campaign_id = ? ORDER BY id').all(campaign.id);
   const brand = campaign.brand_id ? db.prepare('SELECT * FROM brands WHERE id = ?').get(campaign.brand_id) : null;
-  const analysis = await analyzeFn({ campaign, prospect, segments, brand });
-  const withIndustry = { ...prospect, segment_id: analysis.segmentId ?? null };
+  const personas = brand ? db.prepare('SELECT * FROM personas WHERE brand_id = ? ORDER BY position, id').all(brand.id) : [];
+  const analysis = await analyzeFn({ campaign, prospect, segments, brand, personas });
+  // Buyer persona: title keywords first (deterministic), then Jev's choice.
+  const persona = matchPersona(prospect.title, personas) || personas.find((pe) => pe.id === analysis.personaId) || null;
+  if (persona) {
+    analysis.persona = persona.name;
+    if (['unclear', 'unknown', 'partial'].includes(analysis.roleFit)) analysis.roleFit = 'yes';
+    if (persona.problem) analysis.problem = persona.problem;
+  }
+  const withIndustry = { ...prospect, segment_id: analysis.segmentId ?? null, persona_id: persona?.id ?? null };
   const suppressed = Boolean(db.prepare('SELECT 1 FROM suppressions WHERE user_id = ? AND email = ?').get(campaign.user_id, prospect.email));
   const activeElsewhere = Boolean(db.prepare(
     `SELECT 1 FROM prospects p JOIN campaigns c ON c.id = p.campaign_id
@@ -207,12 +271,15 @@ export async function analyzeAndClassify(db, prospect, campaign, { analyzeFn = a
     suppressed,
     activeElsewhere,
     verifiable: verifiableData(db, campaign, withIndustry),
+    persona,
+    hasPersonas: personas.length > 0,
   });
   const at = new Date(now()).toISOString();
   db.prepare('INSERT INTO decisions (prospect_id, step_number, engine, action, detail_json, created_at) VALUES (?, 0, ?, ?, ?, ?)')
     .run(prospect.id, analysis.engine, verdict.status === 'excluded' ? 'exclude' : 'analyze', JSON.stringify({ ...analysis, lead_status: verdict.status, reasons: verdict.reasons }), at);
   const update = {
     segment_id: analysis.segmentId ?? null,
+    persona_id: persona?.id ?? null,
     fit_score: analysis.fitScore ?? prospect.fit_score ?? null,
     intel_json: JSON.stringify({ ...analysis, questions: verdict.questions }),
     intel_at: at,
@@ -256,6 +323,10 @@ export function createScheduler({
     sender: db.prepare('SELECT * FROM senders WHERE id = ?'),
     lastMessage: db.prepare('SELECT * FROM messages WHERE prospect_id = ? ORDER BY step_number DESC LIMIT 1'),
     openDraft: db.prepare("SELECT * FROM drafts WHERE prospect_id = ? AND step_number = ? AND status IN ('pending','approved') ORDER BY id DESC LIMIT 1"),
+    colleagueMessages: db.prepare(
+      `SELECT m.variant_id, m.problem_id, m.persona_id, m.step_number, m.body_text, p.first_name, p.last_name, p.company, p.title, p.email
+       FROM messages m JOIN prospects p ON p.id = m.prospect_id WHERE p.company_id = ? AND p.id != ?`,
+    ),
     logDecision: db.prepare(
       'INSERT INTO decisions (prospect_id, step_number, engine, action, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
     ),
@@ -384,6 +455,11 @@ export function createScheduler({
   async function createDraft({ campaign, prospect, step, sender, totalSteps, stats }) {
     const at = now();
     const candidates = candidatesFor(db, { campaign, prospect, step, sender });
+    // Account rule: never repeat the argument a colleague at the same company already received.
+    const colleagues = prospect.company_id ? stmts.colleagueMessages.all(prospect.company_id, prospect.id) : [];
+    const usedVariants = new Set(colleagues.map((c) => c.variant_id));
+    const fresh = candidates.variants.filter((v) => !usedVariants.has(v.id));
+    if (fresh.length) candidates.variants = fresh;
     const withStats = (list, map) => list.map((x) => ({ ...x, stats: map.get(x.id) || { sent: 0, replied: 0, positive: 0 } }));
     const canThread = Boolean(prospect.thread_id && prospect.sender_id === sender.id);
     const threadSubject = canThread ? prospect.first_subject : null;
@@ -393,6 +469,7 @@ export function createScheduler({
       campaign,
       prospect,
       segment,
+      persona: candidates.persona,
       stepNumber: step.step_number,
       totalSteps,
       engagement: engagementFor(db, prospect, campaign, at),
@@ -410,7 +487,7 @@ export function createScheduler({
     const variant = pick(candidates.variants, decision.variantId) || candidates.variants[0];
     const hook = pick(candidates.hooks, decision.hookId) || candidates.hooks[0] || null;
     const problem = pick(candidates.problems, decision.problemId) || candidates.problems[0] || null;
-    const cta = pick(candidates.ctas, decision.ctaId) || null;
+    const cta = pick(candidates.ctas, decision.ctaId) || (candidates.ctas[0]?.persona ? candidates.ctas[0] : null);
     const rendered = renderDraft({ prospect, sender, variant, cta, hook, problem, step, threadSubject, fallbackSubject: prospect.first_subject });
     const quality = checkDraft({
       subject: rendered.subject,
@@ -423,12 +500,18 @@ export function createScheduler({
       prospect,
     });
     quality.personalized = rendered.personalized;
+    for (const extra of argumentIssues({ persona: candidates.persona, variant, problem, body: rendered.body, stepNumber: step.step_number, colleagues })) {
+      quality.issues.push(extra);
+      if (extra.severity === 'error') quality.errors += 1;
+      if (extra.severity === 'warning') quality.warnings += 1;
+    }
+    quality.passed = !quality.errors;
     const status = needsApproval(campaign.approval_mode || 'first', step.step_number, quality) ? 'pending' : 'approved';
     const id = Number(db.prepare(
-      `INSERT INTO drafts (prospect_id, campaign_id, step_number, sender_id, variant_id, cta_id, hook_id, problem_id, subject, body,
+      `INSERT INTO drafts (prospect_id, campaign_id, step_number, sender_id, variant_id, cta_id, hook_id, problem_id, persona_id, subject, body,
          same_thread, quality_json, decision_json, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(prospect.id, campaign.id, step.step_number, sender.id, variant.id, cta?.id ?? null, hook?.id ?? null, problem?.id ?? null,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(prospect.id, campaign.id, step.step_number, sender.id, variant.id, storedId(cta), hook?.id ?? null, storedId(problem), candidates.persona?.id ?? null,
       rendered.subject, rendered.body, rendered.sameThread ? 1 : 0, JSON.stringify(quality), JSON.stringify(decision), status, nowIso(at)).lastInsertRowid);
     if (status === 'pending') setProspect(prospect.id, { next_send_at: null }); // waits for approval
     return db.prepare('SELECT * FROM drafts WHERE id = ?').get(id);
@@ -479,10 +562,10 @@ export function createScheduler({
 
     db.transaction(() => {
       db.prepare(
-        `INSERT INTO messages (prospect_id, campaign_id, sender_id, step_number, variant_id, cta_id, subject, body_text,
+        `INSERT INTO messages (prospect_id, campaign_id, sender_id, step_number, variant_id, cta_id, persona_id, problem_id, subject, body_text,
            gmail_message_id, gmail_thread_id, message_id_header, tracking_token, decision_json, sent_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(prospect.id, campaign.id, sender.id, step.step_number, draft.variant_id, draft.cta_id, subject, draft.body,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(prospect.id, campaign.id, sender.id, step.step_number, draft.variant_id, draft.cta_id, draft.persona_id ?? null, draft.problem_id ?? null, subject, draft.body,
         sent.id, sent.threadId, messageIdHeader, token, draft.decision_json, nowIso(at));
       db.prepare("UPDATE drafts SET status = 'sent' WHERE id = ?").run(draft.id);
       setProspect(prospect.id, {

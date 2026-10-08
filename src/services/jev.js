@@ -165,7 +165,7 @@ export function ruleAnalysis({ prospect, segments, brand }) {
 export async function analyzeProspect(ctx, { client = defaultClient() } = {}) {
   const fallback = ruleAnalysis(ctx);
   if (!ctx.campaign.jev_enabled || !client) return fallback;
-  const { campaign, prospect, segments, brand } = ctx;
+  const { campaign, prospect, segments, brand, personas = [] } = ctx;
   const industries = listOf(brand?.industries);
   const functions = listOf(brand?.functions);
   const problems = listOf(brand?.problems);
@@ -199,6 +199,12 @@ export async function analyzeProspect(ctx, { client = defaultClient() } = {}) {
       none: 'None of them is likely to matter to this person',
     });
   }
+  if (personas.length) {
+    questions.persona = choice('Which buyer persona in `buyer_personas` matches this person, given their title and responsibilities? Each persona buys for a different reason.', {
+      ...Object.fromEntries(personas.map((pe) => [`b${pe.id}`, truncate(`${pe.name}: ${pe.motivation}`, 300)])),
+      none: 'None of the personas matches this person',
+    });
+  }
   if (industries.length && !prospect.industry) {
     questions.industry = choice("Which of these industries best describes the prospect's company?", {
       ...Object.fromEntries(industries.map((ind, i) => [`i${i}`, ind])),
@@ -229,6 +235,7 @@ export async function analyzeProspect(ctx, { client = defaultClient() } = {}) {
         offer: truncate(offer, 1200),
         ideal_customer_profile: truncate(campaign.icp, 1200),
         segments: Object.fromEntries(segments.map((sg) => [`s${sg.id}`, { name: sg.name, description: sg.description }])),
+        buyer_personas: Object.fromEntries(personas.map((pe) => [`b${pe.id}`, { name: pe.name, titles: truncate(pe.match_titles, 300), motivation: truncate(pe.motivation, 300) }])),
         prospect: prospectFacts(prospect),
       },
       questions,
@@ -239,6 +246,7 @@ export async function analyzeProspect(ctx, { client = defaultClient() } = {}) {
     return {
       engine: 'jev',
       segmentId: seg,
+      personaId: a.persona && a.persona.choice !== 'none' && a.persona.confidence >= 0.5 ? Number(a.persona.choice.slice(1)) : null,
       fitScore: a.fit ? Number((a.fit.score / 4).toFixed(3)) : null,
       exclude: (a.exclude?.noul ?? 0) >= STOP_THRESHOLD,
       companyFit: industries.length ? level(a.company_fit) : 'unknown',
@@ -252,6 +260,7 @@ export async function analyzeProspect(ctx, { client = defaultClient() } = {}) {
         role_fit: a.role_fit ? { score: a.role_fit.score, confidence: a.role_fit.confidence } : null,
         problem: summary(a.problem),
         segment: summary(a.segment),
+        persona: summary(a.persona),
         industry: summary(a.industry),
         fit: a.fit ? { score: a.fit.score, confidence: a.fit.confidence } : null,
       },
@@ -269,13 +278,18 @@ export async function analyzeProspect(ctx, { client = defaultClient() } = {}) {
 
 /** Builds the state object Jev evaluates. Kept compact: only facts useful for the judgments. */
 export function buildState(ctx) {
-  const { campaign, prospect, segment, stepNumber, totalSteps, engagement, variants, ctas, hooks = [], problems = [] } = ctx;
+  const { campaign, prospect, segment, persona, stepNumber, totalSteps, engagement, variants, ctas, hooks = [], problems = [] } = ctx;
   return {
     campaign: {
       offer: truncate(campaign.offer, 1500),
       ideal_customer_profile: truncate(campaign.icp, 1500),
     },
-    prospect: { ...prospectFacts(prospect), segment: segment ? `${segment.name}: ${segment.description}` : null },
+    prospect: {
+      ...prospectFacts(prospect),
+      segment: segment ? `${segment.name}: ${segment.description}` : null,
+      // Buyer persona: what this role cares about; the message must speak to it.
+      buyer_persona: persona ? { name: persona.name, motivation: truncate(persona.motivation, 300), argument: truncate(persona.argument, 300) } : null,
+    },
     sequence: { next_step: stepNumber, total_steps: totalSteps, is_follow_up: stepNumber > 1 },
     engagement,
     candidate_messages: Object.fromEntries(

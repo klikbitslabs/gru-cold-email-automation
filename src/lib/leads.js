@@ -18,7 +18,7 @@ const ANSWER = { yes: 'sí', partial: 'parcial', unclear: 'no está claro', unkn
  * }
  * @returns {{ status, reasons: string[], questions: Array<{ id, question, answer, ok, detail }> }}
  */
-export function classifyLead({ prospect, analysis, brand, suppressed, activeElsewhere, verifiable }) {
+export function classifyLead({ prospect, analysis, brand, suppressed, activeElsewhere, verifiable, persona = null, hasPersonas = false }) {
   const excluded = [];
   const research = [];
   const industry = prospect.industry || analysis.inferredIndustry || '';
@@ -41,6 +41,8 @@ export function classifyLead({ prospect, analysis, brand, suppressed, activeElse
   if (brand && analysis.companyFit !== 'yes' && analysis.companyFit !== 'partial' && analysis.companyFit !== 'no') research.push('no está claro si la empresa encaja con la marca');
   if (brand && ['unclear', 'unknown'].includes(analysis.roleFit) && prospect.title) research.push('no está claro si el cargo es relevante');
   if (!verifiable.ok) research.push('no hay datos verificables para personalizar');
+  // With buyer personas defined, every contact needs one: its argument depends on it.
+  if (hasPersonas && !persona && prospect.title && analysis.roleFit !== 'no') research.push('el cargo no coincide con ningún perfil de comprador de la marca');
 
   const status = excluded.length ? 'excluded' : research.length ? 'research' : 'ready';
   const brandName = brand?.name || 'la marca';
@@ -57,14 +59,18 @@ export function classifyLead({ prospect, analysis, brand, suppressed, activeElse
       question: '¿Esta persona tiene responsabilidades relacionadas con lo que vendemos?',
       answer: ANSWER[analysis.roleFit] || 'sin datos',
       ok: ['yes', 'partial'].includes(analysis.roleFit),
-      detail: prospect.title ? `Cargo: ${prospect.title}` : 'Sin cargo en los datos',
+      detail: prospect.title
+        ? `Cargo: ${prospect.title}${persona ? ` · Perfil: ${persona.name}${persona.motivation ? ` — le importa: ${persona.motivation}` : ''}` : ''}`
+        : 'Sin cargo en los datos',
     },
     {
       id: 'problem',
       question: '¿Qué problema podría importarle según su cargo e industria?',
       answer: analysis.problem || 'sin hipótesis',
       ok: Boolean(analysis.problem),
-      detail: analysis.problem ? 'Hipótesis de la marca elegida para esta persona' : 'Define los problemas en la marca',
+      detail: analysis.problem
+        ? (persona?.problem ? `Argumento propio del perfil ${persona.name}${persona.argument ? `: ${persona.argument}` : ''}` : 'Hipótesis de la marca elegida para esta persona')
+        : 'Define los problemas en la marca',
     },
     {
       id: 'verifiable',

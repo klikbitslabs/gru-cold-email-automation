@@ -75,11 +75,26 @@ const brandBlock = (brand) => [
   brand.avoid && `Nunca uses estas palabras o promesas: ${brand.avoid}`,
 ].filter(Boolean).join('\n');
 
+/** Who reads the email: the same company buys for different reasons depending on the role. */
+const personaBlock = (persona) => (persona
+  ? [
+    `Destinatario: perfil "${persona.name}". Escribe SOLO para este perfil; otra persona de la misma empresa recibirá un argumento distinto.`,
+    persona.motivation && `- Lo que le importa / cómo lo miden: ${persona.motivation}`,
+    persona.problem && `- Su problema, en su lenguaje: ${persona.problem}`,
+    persona.argument && `- Cómo le ayuda la marca: ${persona.argument}`,
+    persona.proof && `- Prueba relevante para este rol: ${persona.proof}`,
+    persona.cta && `- Pedido adecuado a su nivel: ${persona.cta}`,
+    persona.avoid && `- No le hables de: ${persona.avoid}`,
+    'Reglas de oro: habla de SU prioridad (no de funciones del producto), usa el vocabulario de su cargo (operativos: detalle concreto; directivos: impacto en dinero y riesgo, más breve) y haz un solo pedido acorde a su nivel. No menciones a otras personas de su empresa.',
+  ].filter(Boolean).join('\n')
+  : 'Destinatario: cualquier perfil del segmento. Aun así, el argumento debe apoyarse en la responsabilidad de su cargo ({{title}}).');
+
 // Why the decision center asked for new copy (see services/decisions.js).
 const FOCUS = {
   subject: 'la tasa de apertura es baja; prueba asuntos claramente distintos (más específicos para el cargo o el problema) y mantén el cuerpo que mejor funciona.',
   followup: 'este seguimiento no está generando respuestas; cambia el ángulo (otro problema, prueba social concreta o un cierre respetuoso) en lugar de repetir el mensaje anterior.',
   challenger: 'crea retadores de la variante ganadora cambiando una sola cosa a la vez.',
+  persona: 'este perfil todavía no tiene un mensaje propio; escribe uno centrado en su motivación, distinto del que reciben otros cargos de la misma empresa.',
 };
 
 /**
@@ -88,7 +103,7 @@ const FOCUS = {
  * @returns {Promise<{ variants: Array, model: string }>}
  */
 export async function generateVariants(ctx, { fetchFn = fetch } = {}) {
-  const { brand, campaign, segment, stepNumber, channel = 'email', count = 2, performance = [], fields = [], sameThread = true, focus = '' } = ctx;
+  const { brand, campaign, segment, persona = null, stepNumber, channel = 'email', count = 2, performance = [], fields = [], sameThread = true, focus = '' } = ctx;
   const isFirst = stepNumber === 1;
   const ranked = [...performance].sort((a, b) => (b.reply_rate ?? 0) - (a.reply_rate ?? 0) || (b.open_rate ?? 0) - (a.open_rate ?? 0));
   const history = ranked.length
@@ -118,6 +133,7 @@ Campaña: ${campaign.name}
 Oferta: ${campaign.offer || '(ver propuesta de valor)'}
 ICP: ${campaign.icp || '(ver industrias y funciones de la marca)'}
 Segmento: ${segment ? `${segment.name} — ${segment.description}` : 'todos los prospectos'}
+${personaBlock(persona)}
 Paso ${stepNumber} de la secuencia (${channel}).
 
 ${rules}

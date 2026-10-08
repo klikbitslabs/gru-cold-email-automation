@@ -64,13 +64,15 @@ export function abGroups(db, campaignId) {
     db.prepare('SELECT variant_id AS id, SUM(open_count > 0) AS n FROM messages WHERE campaign_id = ? GROUP BY variant_id').all(campaignId).map((r) => [r.id, r.n]),
   );
   const rows = db.prepare(
-    `SELECT v.*, s.step_number, s.same_thread, sg.name AS segment FROM variants v JOIN steps s ON s.id = v.step_id LEFT JOIN segments sg ON sg.id = v.segment_id
+    `SELECT v.*, s.step_number, s.same_thread, sg.name AS segment, pe.name AS persona FROM variants v JOIN steps s ON s.id = v.step_id
+     LEFT JOIN segments sg ON sg.id = v.segment_id LEFT JOIN personas pe ON pe.id = v.persona_id
      WHERE s.campaign_id = ? AND s.channel = 'email' ORDER BY s.step_number, v.id`,
   ).all(campaignId);
   const groups = new Map();
   for (const v of rows) {
-    const key = `${v.step_number}|${v.segment || ''}`;
-    if (!groups.has(key)) groups.set(key, { step_number: v.step_number, segment: v.segment || '', variants: [] });
+    // Variants compete only against variants for the same step, segment and buyer persona.
+    const key = `${v.step_number}|${v.segment || ''}|${v.persona_id || ''}`;
+    if (!groups.has(key)) groups.set(key, { step_number: v.step_number, segment: v.segment || '', persona_id: v.persona_id || null, persona: v.persona || '', variants: [] });
     const st = perf.get(v.id) || { sent: 0, replied: 0, positive: 0 };
     groups.get(key).variants.push({
       id: v.id, label: v.label, status: v.status, origin: v.origin, rationale: v.rationale, subject: v.subject, body: v.body,
@@ -97,7 +99,7 @@ export function approveDrafts(db, campaignId, at) {
 }
 
 /** Asks the AI for new proposed variants of one step (they still need approval to be sent). */
-export async function generateForStep(db, { campaign, stepNumber, segmentName = '', count = 2, baseVariantId, focus = '', generateFn = generateVariants }) {
+export async function generateForStep(db, { campaign, stepNumber, segmentName = '', personaId = null, count = 2, baseVariantId, focus = '', generateFn = generateVariants }) {
   if (generateFn === generateVariants && !openaiConfigured()) {
     throw Object.assign(new Error('Configura la API key de OpenAI en Integraciones para generar textos.'), { status: 400 });
   }
@@ -106,12 +108,15 @@ export async function generateForStep(db, { campaign, stepNumber, segmentName = 
   const brand = campaign.brand_id ? db.prepare('SELECT * FROM brands WHERE id = ?').get(campaign.brand_id) : null;
   if (!brand) throw Object.assign(new Error('Asigna una marca a la campaña: la IA escribe con su contexto.'), { status: 400 });
   const segment = segmentName ? db.prepare('SELECT * FROM segments WHERE campaign_id = ? AND name = ?').get(campaign.id, segmentName) : null;
+  const persona = personaId ? db.prepare('SELECT * FROM personas WHERE id = ? AND brand_id = ?').get(personaId, brand.id) : null;
+  if (personaId && !persona) throw Object.assign(new Error('El perfil no pertenece a la marca de la campaña.'), { status: 400 });
 
   const perf = performanceStats(db, campaign.id).variants;
   const opened = new Map(db.prepare('SELECT variant_id AS id, SUM(open_count > 0) AS n FROM messages WHERE campaign_id = ? GROUP BY variant_id').all(campaign.id).map((r) => [r.id, r.n]));
   const rate = (n, d) => (d ? Math.round((n / d) * 1000) / 10 : null);
   const performance = step.variants
     .filter((v) => v.status !== 'proposed' && (!segment || !v.segment_id || v.segment_id === segment.id))
+    .filter((v) => !v.persona_id || v.persona_id === persona?.id)
     .filter((v) => !baseVariantId || v.id === baseVariantId || (perf.get(v.id)?.sent || 0) > 0)
     .map((v) => {
       const st = perf.get(v.id) || { sent: 0, replied: 0 };
@@ -122,6 +127,7 @@ export async function generateForStep(db, { campaign, stepNumber, segmentName = 
     brand,
     campaign,
     segment,
+    persona,
     stepNumber: step.step_number,
     channel: step.channel,
     sameThread: Boolean(step.same_thread),
@@ -133,10 +139,11 @@ export async function generateForStep(db, { campaign, stepNumber, segmentName = 
   const created = [];
   db.transaction(() => {
     for (const v of result.variants) {
+      const label = `IA · ${persona ? `${persona.name} · ` : ''}${v.label}`.slice(0, 60);
       const id = Number(db.prepare(
-        "INSERT INTO variants (step_id, label, angle, segment_id, subject, body, status, origin, rationale) VALUES (?, ?, ?, ?, ?, ?, 'proposed', 'ai', ?)",
-      ).run(step.id, `IA · ${v.label}`.slice(0, 60), v.angle, segment?.id ?? null, v.subject, v.body, v.rationale).lastInsertRowid);
-      created.push({ id, ...v });
+        "INSERT INTO variants (step_id, label, angle, segment_id, persona_id, subject, body, status, origin, rationale) VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', 'ai', ?)",
+      ).run(step.id, label, v.angle, segment?.id ?? null, persona?.id ?? null, v.subject, v.body, v.rationale).lastInsertRowid);
+      created.push({ id, ...v, label, persona_id: persona?.id ?? null });
     }
   })();
   return { model: result.model, variants: created };
@@ -208,8 +215,8 @@ function campaignCandidates(db, campaign, at, { canGenerate }) {
   // Copy: A/B pauses + one "new copy" recommendation per step/segment (subject > follow-up > challenger).
   const generate = new Map();
   const wantCopy = (g, focus, severity, title, reason, baseId, evidence) => {
-    const key = `generate:${campaign.id}:${g.step_number}:${g.segment}`;
-    const rank = { subject: 3, followup: 2, challenger: 1 };
+    const key = `generate:${campaign.id}:${g.step_number}:${g.segment}:${g.persona_id || ''}`;
+    const rank = { persona: 4, subject: 3, followup: 2, challenger: 1 };
     if (proposedIn(g) || (generate.has(key) && rank[generate.get(key).evidence.focus] >= rank[focus])) return;
     const ready = canGenerate && hasBrand;
     generate.set(key, {
@@ -219,7 +226,7 @@ function campaignCandidates(db, campaign, at, { canGenerate }) {
       title: `${name} · ${title}`,
       reason: ready ? reason : `${reason} Configura OpenAI en Integraciones y asigna una marca para generarlas automáticamente, o escribe una variante manual.`,
       evidence: { focus, step_number: g.step_number, segment: g.segment, ...evidence },
-      action: ready ? { kind: 'generate_variants', campaign_id: campaign.id, step_number: g.step_number, segment: g.segment, base_variant_id: baseId, count: 2, focus } : null,
+      action: ready ? { kind: 'generate_variants', campaign_id: campaign.id, step_number: g.step_number, segment: g.segment, persona_id: g.persona_id || null, base_variant_id: baseId, count: 2, focus } : null,
     });
   };
   for (const r of abRecommendations(groups)) {
@@ -234,7 +241,7 @@ function campaignCandidates(db, campaign, at, { canGenerate }) {
         action: { kind: 'pause_variant', variant_id: r.variant_id },
       });
     } else if (r.type === 'challenge') {
-      const g = groups.find((x) => x.step_number === r.step_number && x.segment === r.segment);
+      const g = groups.find((x) => x.step_number === r.step_number && x.segment === r.segment && (x.persona_id ?? null) === (r.persona_id ?? null));
       const sent = g.variants.reduce((a, v) => a + v.sent, 0);
       if (sent >= AB_MIN_SENDS) wantCopy(g, 'challenger', 'low', r.title, r.reason, r.variant_id, { sent });
     }
@@ -256,6 +263,21 @@ function campaignCandidates(db, campaign, at, { canGenerate }) {
       wantCopy(g, 'followup', 'medium', `Paso ${g.step_number}${g.segment ? ` · ${g.segment}` : ''}: el seguimiento no genera respuestas`,
         `${sent} envíos y 0 respuestas en este paso. Cambia el ángulo (otro problema, prueba social o cierre respetuoso).`, active[0]?.id, { sent });
     }
+  }
+  // Golden rule: each buyer persona needs its own argument. Personas with ready leads but no
+  // first email (and no problem of their own in the brand) get a recommendation.
+  const personaGaps = db.prepare(
+    `SELECT pe.id, pe.name, pe.problem, COUNT(p.id) AS leads FROM prospects p JOIN personas pe ON pe.id = p.persona_id
+     WHERE p.campaign_id = ? AND p.status = 'active' AND p.lead_status = 'ready' GROUP BY pe.id`,
+  ).all(campaign.id);
+  const first = groups.filter((g) => g.step_number === 1);
+  for (const pe of personaGaps) {
+    if (pe.leads < 3) continue;
+    const own = first.some((g) => g.persona_id === pe.id && g.variants.some((v) => v.status !== 'paused'));
+    if (own || pe.problem?.trim()) continue;
+    const g = { step_number: 1, segment: '', persona_id: pe.id, persona: pe.name, variants: [] };
+    wantCopy(g, 'persona', 'medium', `Paso 1: no hay un argumento propio para ${pe.name} (${pe.leads} leads)`,
+      `Estos contactos recibirían el mensaje genérico. Escribe su problema en la marca (perfil ${pe.name}) o genera variantes para este perfil: cada cargo de una empresa debe recibir un argumento distinto.`, null, { persona: pe.name, leads: pe.leads });
   }
   out.push(...generate.values());
 
@@ -531,7 +553,7 @@ export async function applyAction(db, userId, action, { generateFn = generateVar
     case 'generate_variants': {
       const campaign = ownCampaign(action.campaign_id);
       const r = await generateForStep(db, {
-        campaign, stepNumber: action.step_number, segmentName: action.segment, count: action.count, baseVariantId: action.base_variant_id, focus: action.focus, generateFn,
+        campaign, stepNumber: action.step_number, segmentName: action.segment, personaId: action.persona_id, count: action.count, baseVariantId: action.base_variant_id, focus: action.focus, generateFn,
       });
       return `${r.variants.length} variante(s) propuesta(s) creadas: ${r.variants.map((v) => `"${v.label}"`).join(', ')}. Revísalas en Secuencia.`;
     }

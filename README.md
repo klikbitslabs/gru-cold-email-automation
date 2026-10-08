@@ -87,6 +87,18 @@ Sin clave de Jev, 1–3 se responden por coincidencia de palabras clave y, ante 
 
 **Empresas.** Los leads se agrupan por dominio corporativo (o nombre). La vista *Empresas* muestra el estado de cada cuenta y sus contactos en todas las campañas. Reglas por campaña: máximo de contactos por empresa (por defecto 3; el resto queda en reserva), días entre el primer correo a colegas y detener a los colegas cuando alguien de la empresa responde.
 
+## Perfiles de comprador: un argumento por cargo
+
+Un Demand Planner, un gerente de Supply Chain y un director financiero pueden ser clientes en la misma empresa, pero los mueven cosas distintas. En **Marcas → 5. Perfiles de comprador** defines cada perfil (o cargas los sugeridos para planificación de demanda): cargos que lo identifican, qué le importa, su problema en su lenguaje, cómo le ayuda la marca, prueba, pedido acorde a su nivel y qué evitar.
+
+- Cada lead se asigna a un perfil por su cargo (palabras clave; si no hay coincidencia, Jev). Sin perfil → *Requiere investigación*.
+- `{{problema}}` y `{{cta}}` se llenan con el problema y el pedido **de su perfil**; las variantes pueden marcarse para un perfil y compiten en A/B solo dentro de él.
+- La IA redacta para el perfil elegido con las reglas de oro (su prioridad, su vocabulario, un pedido de su nivel).
+- Control de calidad por cuenta: ⛔ variante de otro perfil, ⛔ primer correo ≥60% similar al de un colega de la misma empresa, ⚠️ mensaje genérico para un perfil definido, ⚠️ mencionar a un colega. Además, no se repite la variante que ya recibió un colega.
+- Decisiones avisa cuando un perfil con leads aptos no tiene argumento propio; Analítica muestra resultados por perfil; Empresas muestra qué argumento recibió cada contacto.
+
+Las reglas de oro completas están en la pantalla *Reglas* y en `docs/BEST_PRACTICES.md`.
+
 ## Reglas de envío
 
 Pestaña *Reglas de envío* de cada campaña (como un "autopilot"): días y horario **por día** (p. ej. L–V 08:00–17:00, sábado 09:00–13:00, domingo apagado), zona horaria, **máximo de correos por día** de la campaña y **pausa entre correos** en minutos, con un resumen de cuánto tardan 100 correos. Los límites diarios y pausas de cada sender se siguen respetando.

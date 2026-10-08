@@ -306,7 +306,7 @@ function campaignPayload(c) {
     segments: c.segments.map(({ id, name, description }) => ({ id, name, description })),
     steps: c.steps.map((s) => ({
       channel: s.channel, delay_days: Number(s.delay_days) || 0, same_thread: s.same_thread,
-      variants: s.variants.map(({ id, status, origin, rationale, label, angle, segment, subject, body }) => ({ id, status: status || 'active', origin: origin || 'manual', rationale: rationale || '', label, angle: angle || '', segment: segment || '', subject: subject || '', body })),
+      variants: s.variants.map(({ id, status, origin, rationale, label, angle, segment, persona_id: personaId, subject, body }) => ({ id, status: status || 'active', origin: origin || 'manual', rationale: rationale || '', label, angle: angle || '', segment: segment || '', persona_id: personaId ? Number(personaId) : null, subject: subject || '', body })),
     })),
     hooks: c.hooks.map(snippet),
     problems: c.problems.map(snippet),
@@ -322,6 +322,7 @@ async function saveCampaign(c, button) {
   });
 }
 
+const personaOptions = (personas, current, empty = 'Cualquier perfil (genérica)') => `<option value="">${esc(empty)}</option>${personas.map((p) => `<option value="${p.id}" ${Number(current) === p.id ? 'selected' : ''} title="${esc(p.motivation)}">${esc(p.name)}</option>`).join('')}`;
 const segmentOptions = (segments, current) => `<option value="">Todos los segmentos</option>${segments.map((sg) => `<option ${sg.name === current ? 'selected' : ''}>${esc(sg.name)}</option>`).join('')}`;
 
 function issuesHtml(issues, okText) {
@@ -381,6 +382,7 @@ async function renderSequence(el, campaign) {
             <div><label>Nombre</label><input type="text" data-k="label" value="${esc(v.label)}"></div>
             ${email ? `<div><label>Ángulo <span class="hint">(lo lee Jev)</span></label><input type="text" data-k="angle" value="${esc(v.angle)}"></div>` : ''}
             ${c.segments.length ? `<div><label>Segmento</label><select data-k="segment">${segmentOptions(c.segments, v.segment)}</select></div>` : ''}
+            ${email && c.personas?.length ? `<div><label>Perfil de comprador <span class="hint">(a quién le habla)</span></label><select data-k="persona_id">${personaOptions(c.personas, v.persona_id)}</select></div>` : ''}
           </div>
           ${needsSubject ? `<div style="margin-top:8px"><label>Asunto <span class="hint">(3–7 palabras, conversacional, sin emojis)</span></label><input type="text" data-k="subject" data-lint value="${esc(v.subject)}"></div>` : ''}
           <div style="margin-top:8px"><label>${email ? `Cuerpo <span class="hint">(45–85 palabras renderizado; 3 párrafos; una acción)</span>` : 'Guion / mensaje'}</label>
@@ -394,7 +396,8 @@ async function renderSequence(el, campaign) {
       <div class="row" style="margin-top:10px">
         ${s.variants.length < 12 ? '<button class="btn ghost small" data-add-variant>+ Variante</button>' : ''}
         ${s.id ? `<button class="btn ghost small" data-ai-step="${n}" ${meta.openai_configured && c.brand_id ? '' : `disabled title="${meta.openai_configured ? 'Asigna una marca a la campaña' : 'Configura OpenAI en Integraciones'}"`}>✨ Proponer variantes con IA</button>
-          ${c.segments.length ? `<select data-ai-segment="${n}" style="width:auto">${segmentOptions(c.segments, '')}</select>` : ''}` : ''}
+          ${c.segments.length ? `<select data-ai-segment="${n}" style="width:auto">${segmentOptions(c.segments, '')}</select>` : ''}
+          ${email && c.personas?.length ? `<select data-ai-persona="${n}" style="width:auto" aria-label="Perfil para la IA">${personaOptions(c.personas, null, 'Para cualquier perfil')}</select>` : ''}` : ''}
       </div>
     </div>`;
   }
@@ -462,8 +465,9 @@ async function renderSequence(el, campaign) {
     $$('[data-ai-step]', el).forEach((b) => b.addEventListener('click', () => guard(b, async () => {
       const n = Number(b.dataset.aiStep);
       const segment = $(`[data-ai-segment="${n}"]`, el)?.value || '';
+      const persona = Number($(`[data-ai-persona="${n}"]`, el)?.value) || null;
       b.textContent = 'Escribiendo…';
-      const r = await api(`/campaigns/${c.id}/ai/variants`, { method: 'POST', body: { step_number: n, segment, count: 2 } });
+      const r = await api(`/campaigns/${c.id}/ai/variants`, { method: 'POST', body: { step_number: n, segment, persona_id: persona, count: 2 } });
       toast(`${r.variants.length} variante(s) propuesta(s) por IA (${r.model}). Revísalas y apruébalas.`);
       router();
     })));
@@ -700,7 +704,7 @@ async function renderAB(el, campaign) {
     $$('[data-act]', row).forEach((b) => b.addEventListener('click', () => guard(b, async () => {
       if (b.dataset.act === 'pause') await api(`/variants/${r.variant_id}/pause`, { method: 'POST', body: {} });
       else {
-        const res = await api(`/campaigns/${campaign.id}/ai/variants`, { method: 'POST', body: { step_number: r.step_number, segment: r.segment || '', count: 2, base_variant_id: r.variant_id } });
+        const res = await api(`/campaigns/${campaign.id}/ai/variants`, { method: 'POST', body: { step_number: r.step_number, segment: r.segment || '', persona_id: r.persona_id ?? null, count: 2, base_variant_id: r.variant_id } });
         toast(`${res.variants.length} variante(s) propuesta(s) por IA: revísalas y apruébalas`);
       }
       renderAB(el, campaign);
@@ -758,7 +762,7 @@ async function renderProspects(el, campaign, filters = {}) {
             <td><b>${esc([p.first_name, p.last_name].filter(Boolean).join(' ') || '—')}</b><br><span class="muted small">${esc(p.email)}</span></td>
             <td>${esc(p.company)}<br><span class="muted small">${esc(p.title)}${p.industry ? ` · ${esc(p.industry)}` : ''}</span></td>
             <td>${p.intel_at || p.lead_status === 'excluded' ? leadBadge(p.lead_status) : '<span class="muted small">analizando…</span>'}${p.lead_status !== 'ready' && p.lead_status_reasons && p.lead_status_reasons !== 'pendiente de análisis' ? `<br><span class="small muted">${esc(p.lead_status_reasons)}</span>` : ''}${p.validation_status !== 'valid' ? `<br>${validationBadge(p.validation_status)}` : ''}</td>
-            <td>${p.intel_at ? `${esc(p.segment || 'Sin segmento')}<br><span class="small muted">${p.fit_score === null ? '' : `encaje ${Math.round(p.fit_score * 100)}%`}</span>` : (p.status === 'active' ? '<span class="muted small">analizando…</span>' : '—')}</td>
+            <td>${p.intel_at ? `${p.persona ? `<span class="badge persona">${esc(p.persona)}</span><br>` : ''}${esc(p.segment || 'Sin segmento')}<br><span class="small muted">${p.fit_score === null ? '' : `encaje ${Math.round(p.fit_score * 100)}%`}</span>` : (p.status === 'active' ? '<span class="muted small">analizando…</span>' : '—')}</td>
             <td>${badge(p.status)}${p.outcome ? ` <span class="badge ok">${esc(OUTCOME_LABEL[p.outcome])}</span>` : ''}${p.pending_drafts ? ' <span class="badge warn">por aprobar</span>' : ''}
               ${p.reply_category ? `<br><span class="small">${esc(REPLY_LABEL[p.reply_category] || p.reply_category)}</span>` : ''}${p.stop_reason && p.status === 'stopped' ? `<br><span class="small muted">${esc(p.stop_reason)}</span>` : ''}${p.last_error ? `<br><span class="small" style="color:var(--bad)">${esc(p.last_error)}</span>` : ''}</td>
             <td>${p.current_step}/${campaign.steps.length}</td>
@@ -802,6 +806,7 @@ async function showProspect(campaign, id, reload) {
   const body = openModal(`
     <h2>${esc([p.first_name, p.last_name].filter(Boolean).join(' ') || p.email)} ${badge(p.status)} ${p.outcome ? `<span class="badge ok">${esc(OUTCOME_LABEL[p.outcome])}</span>` : ''}</h2>
     <p class="muted">${esc(p.email)} · ${esc(p.title)} ${p.company ? `en ${esc(p.company)}` : ''} ${p.phone ? `· ${esc(p.phone)}` : ''} ${p.linkedin_url ? `· <a href="${esc(p.linkedin_url)}" target="_blank" rel="noopener">LinkedIn</a>` : ''}</p>
+    ${p.persona ? `<p class="notice info small"><b>Perfil de comprador: ${esc(p.persona.name)}</b>${p.persona.motivation ? ` — le importa: ${esc(p.persona.motivation)}` : ''}${p.persona.argument ? `<br>Argumento: ${esc(p.persona.argument)}` : ''}</p>` : ''}
     <p class="small">${validationBadge(p.validation_status)} ${esc(p.validation_notes)} · Segmento: <b>${esc(p.segment || 'sin segmento')}</b>${p.fit_score !== null ? ` · encaje ${Math.round(p.fit_score * 100)}%` : ''} · Origen: ${esc(p.source || '—')} (${esc((meta.lawful_bases || {})[p.lawful_basis] || p.lawful_basis || '—')})</p>
     <p class="small">${leadBadge(p.lead_status)} ${p.lead_status !== 'ready' ? esc(p.lead_status_reasons) : ''} ${p.company_info ? `· Empresa: <a href="#/companies?id=${p.company_info.id}">${esc(p.company_info.name || p.company_info.domain)}</a>` : ''}</p>
     ${p.stop_reason ? `<p class="notice">${esc(p.stop_reason)}</p>` : ''}
@@ -1209,7 +1214,8 @@ async function viewBrands() {
   $('#brand-form').addEventListener('submit', (e) => {
     e.preventDefault();
     guard(e.submitter, async () => {
-      const data = Object.fromEntries(new FormData(e.target).entries());
+      const data = Object.fromEntries([...new FormData(e.target).entries()].filter(([k]) => !k.startsWith('pf_')));
+      data.personas = readPersonas();
       const res = editing.id
         ? await api(`/brands/${editing.id}`, { method: 'PUT', body: data })
         : await api('/brands', { method: 'POST', body: data });
@@ -1218,6 +1224,7 @@ async function viewBrands() {
       if (editing.id) viewBrands();
     });
   });
+  bindPersonaEditor(editing.personas || []);
   $('#brand-delete')?.addEventListener('click', (e) => guard(e.currentTarget, async () => {
     if (!confirm('¿Eliminar la marca? Las campañas que la usan quedarán sin marca.')) return;
     await api(`/brands/${editing.id}`, { method: 'DELETE' });
@@ -1248,8 +1255,63 @@ function brandForm(b) {
         ${field('ref_call', 'Argumento de llamada', { area: true, rows: 3, placeholder: 'Validar cómo planifican la reposición hoy y cuántos faltantes tienen por mes…' })}
       </div>
     </div>
+    <div class="card brand-q">
+      <div class="brand-q-num">5</div>
+      <div class="stack" style="width:100%">
+        <div class="row between"><h3>Perfiles de comprador: un argumento por cargo</h3>
+          <div class="row"><button class="btn ghost small" type="button" id="persona-suggest">Cargar perfiles sugeridos</button><button class="btn ghost small" type="button" id="persona-add">+ Perfil</button></div></div>
+        <p class="muted small">Un Demand Planner, un gerente de Supply Chain y un director financiero pueden ser clientes en la misma empresa, pero los mueve algo distinto. Cada contacto se asigna a un perfil por su cargo y recibe <b>el problema y el pedido de su perfil</b> ({{problema}} y {{cta}}); la IA escribe para ese perfil y dos personas de una misma empresa nunca reciben el mismo argumento. Si defines perfiles, los cargos que no encajan en ninguno quedan en <i>Requiere investigación</i>.</p>
+        <div id="persona-list" class="stack"></div>
+      </div>
+    </div>
     <div class="row"><button class="btn" type="submit">Guardar marca</button>${b.id ? '<button class="btn danger small" type="button" id="brand-delete">Eliminar</button>' : ''}</div>
   </form>`;
+}
+
+const PERSONA_FIELDS = [
+  ['name', 'Perfil', 'Director Financiero', false],
+  ['match_titles', 'Cargos que lo identifican (separados por coma)', 'cfo, director financiero, gerente financiero', false],
+  ['motivation', 'Qué le importa / cómo lo miden', 'Liberar capital de trabajo, margen, previsibilidad del flujo de caja', true],
+  ['problem', 'Su problema, en su lenguaje → {{problema}}', 'Una parte del capital de trabajo queda inmovilizada en inventario que no rota…', true],
+  ['argument', 'Cómo le ayuda la marca', 'Reducir inventario inmovilizado sin perder ventas, con impacto medible…', true],
+  ['proof', 'Prueba relevante para este cargo (solo datos reales)', 'Ej.: resultado verificable de un cliente del mismo sector', true],
+  ['cta', 'Pedido acorde a su nivel → {{cta}}', '¿Vale la pena revisar en 15 minutos cuánto capital podría liberarse?', false],
+  ['avoid', 'No hablarle de', 'Jerga operativa (SKU, MAPE), textos largos', false],
+];
+
+let personaDraft = [];
+function renderPersonaEditor() {
+  $('#persona-list').innerHTML = personaDraft.map((p, i) => `
+    <div class="persona-card" data-pi="${i}">
+      <div class="row between"><b>${esc(p.name || `Perfil ${i + 1}`)}</b><button class="btn danger small" type="button" data-persona-remove="${i}">Quitar</button></div>
+      <div class="persona-grid">${PERSONA_FIELDS.map(([key, label, ph, area]) => `<div class="${area ? 'span2' : ''}"><label class="small">${label}</label>${area
+        ? `<textarea data-pf="${key}" rows="2" style="min-height:52px;font-family:inherit;font-size:13px" placeholder="${esc(ph)}">${esc(p[key] || '')}</textarea>`
+        : `<input type="text" data-pf="${key}" value="${esc(p[key] || '')}" placeholder="${esc(ph)}">`}</div>`).join('')}</div>
+    </div>`).join('') || '<p class="muted small">Sin perfiles: todos los contactos reciben el mismo argumento de la marca.</p>';
+  $$('[data-persona-remove]').forEach((b) => b.addEventListener('click', () => { syncPersonas(); personaDraft.splice(Number(b.dataset.personaRemove), 1); renderPersonaEditor(); }));
+}
+function syncPersonas() {
+  $$('.persona-card').forEach((card) => {
+    const p = personaDraft[Number(card.dataset.pi)];
+    $$('[data-pf]', card).forEach((el) => { p[el.dataset.pf] = el.value; });
+  });
+}
+function readPersonas() {
+  syncPersonas();
+  return personaDraft.filter((p) => p.name?.trim()).map((p) => ({ ...(p.id ? { id: p.id } : {}), ...Object.fromEntries(PERSONA_FIELDS.map(([k]) => [k, p[k] || ''])) }));
+}
+function bindPersonaEditor(initial) {
+  personaDraft = initial.map((p) => ({ ...p }));
+  renderPersonaEditor();
+  $('#persona-add').addEventListener('click', () => { syncPersonas(); personaDraft.push({}); renderPersonaEditor(); });
+  $('#persona-suggest').addEventListener('click', (e) => guard(e.currentTarget, async () => {
+    syncPersonas();
+    const { personas } = await api('/brands/personas/suggested');
+    const have = new Set(personaDraft.map((p) => (p.name || '').toLowerCase()));
+    personaDraft.push(...personas.filter((p) => !have.has(p.name.toLowerCase())).map((p) => ({ ...p })));
+    renderPersonaEditor();
+    toast('Perfiles sugeridos cargados: ajústalos a tu marca y guarda.');
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1285,10 +1347,12 @@ async function showCompany(id) {
   const { company, contacts } = await api(`/companies/${id}`);
   openModal(`<h2>${esc(company.name || company.domain)}</h2>
     <p class="muted">${esc(company.domain)}${company.industry ? ` · ${esc(company.industry)}` : ''} · ${contacts.length} contacto(s)</p>
+    <p class="small muted">Cada persona recibe el argumento de su perfil; dos contactos de esta empresa nunca reciben el mismo mensaje.</p>
     <div class="table-wrap"><table>
-      <thead><tr><th>Contacto</th><th>Campaña</th><th>Lead</th><th>Estado</th><th>Paso</th><th>Último contacto</th></tr></thead>
+      <thead><tr><th>Contacto</th><th>Perfil · argumento</th><th>Campaña</th><th>Lead</th><th>Estado</th><th>Paso</th><th>Último contacto</th></tr></thead>
       <tbody>${contacts.map((ct) => `<tr>
         <td><b>${esc([ct.first_name, ct.last_name].filter(Boolean).join(' ') || ct.email)}</b><br><span class="small muted">${esc(ct.title || '—')} · ${esc(ct.email)}</span></td>
+        <td class="small">${ct.persona ? `<span class="badge persona">${esc(ct.persona)}</span>` : '<span class="muted">sin perfil</span>'}${ct.persona_problem ? `<br><span class="muted">${esc(ct.persona_problem.length > 110 ? `${ct.persona_problem.slice(0, 107)}…` : ct.persona_problem)}</span>` : ''}${ct.last_variant ? `<br><span class="muted">Variante: ${esc(ct.last_variant)}</span>` : ''}</td>
         <td class="small"><a href="#/campaigns/${ct.campaign_id}/prospects">${esc(ct.campaign)}</a></td>
         <td>${leadBadge(ct.lead_status)}${ct.lead_status !== 'ready' && ct.lead_status_reasons ? `<br><span class="small muted">${esc(ct.lead_status_reasons)}</span>` : ''}</td>
         <td>${badge(ct.status)}${ct.outcome ? ` <span class="badge ok">${esc(OUTCOME_LABEL[ct.outcome])}</span>` : ''}</td>
@@ -1311,6 +1375,10 @@ function viewGuide() {
       <li><b>Generación + control de calidad</b> — Jev elige variante, gancho verificable, hipótesis de problema y CTA; el control de calidad aplica las reglas y decide si va a aprobación.</li>
       <li><b>Orquestador</b> — correos dentro de la ventana con límites por sender, tareas de llamada y LinkedIn, seguimientos en el mismo hilo.</li>
       <li><b>Resultados y aprendizaje</b> — respuestas, interés, reuniones, oportunidades y cierres; los resultados por variante vuelven a Jev como evidencia.</li></ol></div>
+    <div class="card"><h2>Reglas de oro del outreach por cargo</h2>
+      <p class="muted small">Un Demand Planner, un gerente de Supply Chain y un director financiero pueden comprar en la misma empresa por motivos distintos. Configura los perfiles en <a href="#/brands">Marcas → 5. Perfiles de comprador</a>.</p>
+      <table><tbody>${rows((meta.golden_rules || []).map(([a, b]) => [esc(a), esc(b)]))}</tbody></table>
+      <p class="small muted">Control de calidad: ⛔ variante escrita para otro perfil · ⛔ primer correo casi idéntico (≥60%) al de un colega de la misma empresa · ⚠️ mensaje genérico para un perfil definido · ⚠️ menciona a un colega.</p></div>
     <div class="grid2">
       <div class="card"><h2>Reglas del asunto</h2><table><tbody>${rows([
         ['Longitud', 'Preferentemente 3–7 palabras'], ['Personalización', 'Cargo, problema o empresa, cuando sea relevante'],
@@ -1440,6 +1508,7 @@ const BREAKDOWNS = [
   ['by_step', 'Paso', (r) => `Paso ${r.step_number}${r.step_number === 1 ? ' · primer correo' : ' · seguimiento'}`],
   ['by_subject', 'Asunto / variante', (r) => `<b>${esc(r.label || 'Sin variante')}</b>${r.variant_step ? ` <span class="small muted">paso ${r.variant_step}</span>` : ''}<br><span class="small muted">${esc(r.subject || '(mismo hilo)')}</span>`],
   ['by_sender', 'Sender', (r) => esc(r.sender || '—')],
+  ['by_persona', 'Perfil', (r) => esc(r.persona)],
   ['by_segment', 'Segmento', (r) => esc(r.segment)],
   ['by_industry', 'Industria', (r) => esc(r.industry)],
   ['by_title', 'Cargo', (r) => esc(r.title)],

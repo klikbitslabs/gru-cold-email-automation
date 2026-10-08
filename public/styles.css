@@ -264,3 +264,9 @@ ol.questions li.q-no { color: var(--text); }
   .hm-hour { font-size: 9px; }
 }
 :root[data-theme="dark"] .btn.ok { color: #0f1117; }
+.persona-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--bg); }
+.persona-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; margin-top: 8px; }
+.persona-grid .span2 { grid-column: span 2; }
+.persona-grid label { margin-bottom: 2px; }
+@media (max-width: 640px) { .persona-grid { grid-template-columns: 1fr; } .persona-grid .span2 { grid-column: auto; } }
+.badge.persona { background: var(--ok-soft); color: var(--ok); }

@@ -151,6 +151,7 @@ export function computeAnalytics(db, opts) {
     by_step: breakdown('m.step_number', 'm.step_number'),
     by_subject: breakdown('m.variant_id', "m.variant_id, v.label, COALESCE(NULLIF(v.subject, ''), MIN(m.subject)) AS subject, s2.step_number AS variant_step", 'LEFT JOIN variants v ON v.id = m.variant_id LEFT JOIN steps s2 ON s2.id = v.step_id'),
     by_sender: breakdown('m.sender_id', 'm.sender_id, se.email AS sender', 'LEFT JOIN senders se ON se.id = m.sender_id'),
+    by_persona: breakdown('p.persona_id', "COALESCE(pe.name, 'Sin perfil') AS persona", 'LEFT JOIN personas pe ON pe.id = p.persona_id'),
     by_segment: breakdown('p.segment_id', "COALESCE(sg.name, 'Sin segmento') AS segment", 'LEFT JOIN segments sg ON sg.id = p.segment_id'),
     by_industry: breakdown("COALESCE(NULLIF(p.industry, ''), '—')", "COALESCE(NULLIF(p.industry, ''), 'Sin industria') AS industry"),
     by_title: breakdown("COALESCE(NULLIF(p.title, ''), '—')", "COALESCE(NULLIF(p.title, ''), 'Sin cargo') AS title"),

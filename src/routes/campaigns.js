@@ -26,6 +26,7 @@ const variantSchema = z.object({
   label: z.string().trim().min(1).max(60),
   angle: z.string().trim().max(500).default(''),
   segment: segmentRef,
+  persona_id: z.number().int().nullable().default(null), // buyer persona of the brand (null = any)
   subject: z.string().trim().max(200).default(''),
   body: z.string().trim().min(1, 'El cuerpo no puede estar vacío').max(5000),
 });
@@ -140,6 +141,7 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
       stop_on_company_reply: Boolean(c.stop_on_company_reply),
       schedule: campaignSchedule(c),
       brand: c.brand_id ? db.prepare('SELECT id, name FROM brands WHERE id = ?').get(c.brand_id) : null,
+      personas: c.brand_id ? db.prepare('SELECT id, name, motivation FROM personas WHERE brand_id = ? ORDER BY position, id').all(c.brand_id) : [],
       sender_ids: db.prepare('SELECT sender_id FROM campaign_senders WHERE campaign_id = ?').all(c.id).map((r) => r.sender_id),
       segments,
       steps: loadSequence(db, c.id).map((s) => ({
@@ -148,7 +150,7 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
         channel: s.channel,
         delay_days: s.delay_days,
         same_thread: Boolean(s.same_thread),
-        variants: s.variants.map((v) => ({ id: v.id, status: v.status, origin: v.origin, rationale: v.rationale, label: v.label, angle: v.angle, segment: segName(v.segment_id), subject: v.subject, body: v.body })),
+        variants: s.variants.map((v) => ({ id: v.id, status: v.status, origin: v.origin, rationale: v.rationale, label: v.label, angle: v.angle, segment: segName(v.segment_id), persona_id: v.persona_id ?? null, subject: v.subject, body: v.body })),
       })),
       hooks: snippetOut('hook'),
       problems: snippetOut('problem'),
@@ -222,6 +224,8 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
       (sid, s) => db.prepare('UPDATE segments SET name = ?, description = ? WHERE id = ?').run(s.name, s.description, sid));
     const segmentIds = new Map(db.prepare('SELECT id, name FROM segments WHERE campaign_id = ?').all(id).map((s) => [s.name.toLowerCase(), s.id]));
     const segId = (name) => (name ? segmentIds.get(name.toLowerCase()) ?? null : null);
+    const brandPersonas = new Set(settings.brand_id ? db.prepare('SELECT id FROM personas WHERE brand_id = ?').all(settings.brand_id).map((r) => r.id) : []);
+    const personaId = (v) => (v.persona_id && brandPersonas.has(v.persona_id) ? v.persona_id : null);
 
     const existingSteps = db.prepare('SELECT * FROM steps WHERE campaign_id = ?').all(id);
     data.steps.forEach((step, index) => {
@@ -234,8 +238,8 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
         stepRow = { id: Number(db.prepare('INSERT INTO steps (campaign_id, step_number, delay_days, same_thread, channel) VALUES (?, ?, ?, ?, ?)').run(id, number, delay, step.same_thread ? 1 : 0, step.channel).lastInsertRowid) };
       }
       sync('variants', { column: 'step_id', value: stepRow.id }, step.variants,
-        (v) => Number(db.prepare('INSERT INTO variants (step_id, label, angle, segment_id, subject, body, status, origin, rationale) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(stepRow.id, v.label, v.angle, segId(v.segment), v.subject, v.body, v.status, v.origin, v.rationale).lastInsertRowid),
-        (vid, v) => db.prepare('UPDATE variants SET label = ?, angle = ?, segment_id = ?, subject = ?, body = ?, status = ?, origin = ?, rationale = ? WHERE id = ?').run(v.label, v.angle, segId(v.segment), v.subject, v.body, v.status, v.origin, v.rationale, vid));
+        (v) => Number(db.prepare('INSERT INTO variants (step_id, label, angle, segment_id, persona_id, subject, body, status, origin, rationale) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(stepRow.id, v.label, v.angle, segId(v.segment), personaId(v), v.subject, v.body, v.status, v.origin, v.rationale).lastInsertRowid),
+        (vid, v) => db.prepare('UPDATE variants SET label = ?, angle = ?, segment_id = ?, persona_id = ?, subject = ?, body = ?, status = ?, origin = ?, rationale = ? WHERE id = ?').run(v.label, v.angle, segId(v.segment), personaId(v), v.subject, v.body, v.status, v.origin, v.rationale, vid));
     });
     db.prepare('DELETE FROM steps WHERE campaign_id = ? AND step_number > ?').run(id, data.steps.length);
 
@@ -255,6 +259,9 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
     const full = fullCampaign(c);
     const problems = [];
     const recommendations = [];
+    // Every buyer persona of the brand brings its own problem / ask (leads without one stay in research).
+    const brandPersonas = c.brand_id ? db.prepare('SELECT problem, cta FROM personas WHERE brand_id = ?').all(c.brand_id) : [];
+    const personaCoverage = (field) => brandPersonas.length > 0 && brandPersonas.every((pe) => pe[field]?.trim());
     const senders = db.prepare('SELECT s.* FROM senders s JOIN campaign_senders cs ON cs.sender_id = s.id WHERE cs.campaign_id = ?').all(c.id);
     if (!senders.length) problems.push('Asigna al menos un sender de Google Workspace.');
     else if (!senders.some((s) => s.status === 'active')) problems.push('Ningún sender asignado está activo.');
@@ -270,9 +277,9 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
         problems.push(`Paso ${s.step_number}: si no va en el mismo hilo, cada variante necesita asunto.`);
       }
       const used = new Set(s.variants.flatMap((v) => templateFields(v.body)));
-      if (used.has('cta') && !full.ctas.length) problems.push(`Paso ${s.step_number} usa {{cta}} pero no hay CTAs.`);
+      if (used.has('cta') && !full.ctas.length && !personaCoverage('cta')) problems.push(`Paso ${s.step_number} usa {{cta}} pero no hay CTAs.`);
       if (used.has('gancho') && !full.hooks.length) problems.push(`Paso ${s.step_number} usa {{gancho}} pero no hay ganchos.`);
-      if (used.has('problema') && !full.problems.length) problems.push(`Paso ${s.step_number} usa {{problema}} pero no hay hipótesis de problema.`);
+      if (used.has('problema') && !full.problems.length && !personaCoverage('problem')) problems.push(`Paso ${s.step_number} usa {{problema}} pero no hay hipótesis de problema.`);
     });
     if (first) {
       const groups = full.segments.length ? full.segments.map((sg) => sg.name) : [''];
@@ -487,10 +494,11 @@ export function campaignRoutes(db, { decideFn = decide, analyzeFn = analyzeProsp
     const rows = db.prepare(
       `SELECT p.id, p.email, p.first_name, p.last_name, p.company, p.title, p.industry, p.status, p.current_step, p.next_send_at, p.fit_score,
           p.stop_reason, p.reply_category, p.last_error, p.validation_status, p.validation_notes, p.outcome, p.intel_at, sg.name AS segment,
-          p.lead_status, p.lead_status_reasons, co.name AS company_name, p.company_id,
+          p.lead_status, p.lead_status_reasons, co.name AS company_name, p.company_id, pe.name AS persona,
           (SELECT COALESCE(SUM(open_count), 0) FROM messages m WHERE m.prospect_id = p.id) AS opens,
           (SELECT COUNT(*) FROM drafts d WHERE d.prospect_id = p.id AND d.status = 'pending') AS pending_drafts
        FROM prospects p LEFT JOIN segments sg ON sg.id = p.segment_id LEFT JOIN companies co ON co.id = p.company_id
+         LEFT JOIN personas pe ON pe.id = p.persona_id
        WHERE ${where.join(' AND ')} ORDER BY p.id LIMIT ${size} OFFSET ${(page - 1) * size}`,
     ).all(params);
     const sample = db.prepare('SELECT fields_json FROM prospects WHERE campaign_id = ? LIMIT 1').get(c.id);

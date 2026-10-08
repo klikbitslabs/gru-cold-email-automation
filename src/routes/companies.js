@@ -33,10 +33,12 @@ export function companyRoutes(db) {
     if (!company) return res.status(404).json({ error: 'Empresa no encontrada' });
     const contacts = db.prepare(
       `SELECT p.id, p.email, p.first_name, p.last_name, p.title, p.status, p.lead_status, p.lead_status_reasons, p.current_step,
-         p.reply_category, p.outcome, p.fit_score, p.next_send_at, c.name AS campaign, c.id AS campaign_id,
+         p.reply_category, p.outcome, p.fit_score, p.next_send_at, c.name AS campaign, c.id AS campaign_id, pe.name AS persona, pe.problem AS persona_problem,
+         (SELECT v.label FROM messages m LEFT JOIN variants v ON v.id = m.variant_id WHERE m.prospect_id = p.id ORDER BY m.step_number DESC LIMIT 1) AS last_variant,
+         (SELECT d.subject FROM drafts d WHERE d.prospect_id = p.id ORDER BY d.id DESC LIMIT 1) AS last_subject,
          (SELECT MAX(sent_at) FROM messages m WHERE m.prospect_id = p.id) AS last_contact,
          (SELECT COALESCE(SUM(open_count), 0) FROM messages m WHERE m.prospect_id = p.id) AS opens
-       FROM prospects p JOIN campaigns c ON c.id = p.campaign_id
+       FROM prospects p JOIN campaigns c ON c.id = p.campaign_id LEFT JOIN personas pe ON pe.id = p.persona_id
        WHERE p.company_id = ? ORDER BY p.current_step DESC, p.id`,
     ).all(company.id);
     res.json({ company, contacts });

@@ -165,12 +165,13 @@ export function workRoutes(db, { now = () => new Date(), analyzeFn = analyzePros
     const tasks = db.prepare('SELECT id, step_number, channel, status, outcome, note, created_at, completed_at FROM tasks WHERE prospect_id = ? ORDER BY id').all(p.id);
     const drafts = db.prepare("SELECT id, step_number, status, subject FROM drafts WHERE prospect_id = ? AND status IN ('pending','approved') ORDER BY id").all(p.id);
     const segment = p.segment_id ? db.prepare('SELECT name FROM segments WHERE id = ?').get(p.segment_id)?.name : null;
+    const persona = p.persona_id ? db.prepare('SELECT id, name, motivation, problem, argument, cta FROM personas WHERE id = ?').get(p.persona_id) : null;
     const company = p.company_id ? db.prepare('SELECT id, name, domain FROM companies WHERE id = ?').get(p.company_id) : null;
     const intel = p.intel_json ? JSON.parse(p.intel_json) : null;
     const questions = [...(intel?.questions || []), nextAction(db, p)];
     const { seen_message_ids_json: _seen, pending_decision_json: _pending, unsubscribe_token: _token, fields_json: fieldsJson, intel_json: intelJson, ...prospect } = p;
     res.json({
-      prospect: { ...prospect, segment, company_info: company, fields: JSON.parse(fieldsJson || '{}'), intel },
+      prospect: { ...prospect, segment, persona, company_info: company, fields: JSON.parse(fieldsJson || '{}'), intel },
       questions,
       messages,
       opens,
@@ -274,9 +275,10 @@ export function workRoutes(db, { now = () => new Date(), analyzeFn = analyzePros
       segment: z.string().trim().max(80).default(''),
       count: z.number().int().min(1).max(3).default(2),
       base_variant_id: z.number().int().optional(),
+      persona_id: z.number().int().nullable().optional(),
     }).parse(req.body);
     const result = await generateForStep(db, {
-      campaign, stepNumber: input.step_number, segmentName: input.segment, count: input.count, baseVariantId: input.base_variant_id, generateFn,
+      campaign, stepNumber: input.step_number, segmentName: input.segment, personaId: input.persona_id ?? null, count: input.count, baseVariantId: input.base_variant_id, generateFn,
     });
     res.status(201).json(result);
   });

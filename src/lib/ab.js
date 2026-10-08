@@ -24,13 +24,14 @@ export function abRecommendations(groups, { minSends = AB_MIN_SENDS } = {}) {
   const out = [];
   for (const g of groups) {
     const active = g.variants.filter((v) => v.status === 'active');
-    const where = `Paso ${g.step_number}${g.segment ? ` · ${g.segment}` : ''}`;
+    const where = `Paso ${g.step_number}${g.segment ? ` · ${g.segment}` : ''}${g.persona ? ` · ${g.persona}` : ''}`;
     if (!active.length) continue;
     if (active.length === 1) {
       out.push({
         type: 'challenge',
         step_number: g.step_number,
         segment: g.segment,
+        persona_id: g.persona_id ?? null,
         variant_id: active[0].id,
         title: `${where}: solo hay una variante activa`,
         reason: `Genera 1–2 retadores de "${active[0].label}" para seguir aprendiendo.`,
@@ -43,6 +44,7 @@ export function abRecommendations(groups, { minSends = AB_MIN_SENDS } = {}) {
         type: 'collect',
         step_number: g.step_number,
         segment: g.segment,
+        persona_id: g.persona_id ?? null,
         title: `${where}: recolectando datos`,
         reason: `Se necesitan al menos ${minSends} envíos por variante (faltan: ${pending.map((v) => `${v.label} ${v.sent}/${minSends}`).join(', ')}).`,
       });
@@ -61,6 +63,7 @@ export function abRecommendations(groups, { minSends = AB_MIN_SENDS } = {}) {
           type: 'pause',
           step_number: g.step_number,
           segment: g.segment,
+        persona_id: g.persona_id ?? null,
           variant_id: v.id,
           winner_id: best.id,
           title: `${where}: pausar "${v.label}"`,
@@ -74,6 +77,7 @@ export function abRecommendations(groups, { minSends = AB_MIN_SENDS } = {}) {
         type: 'challenge',
         step_number: g.step_number,
         segment: g.segment,
+        persona_id: g.persona_id ?? null,
         variant_id: best.id,
         title: `${where}: crear retador para "${best.label}"`,
         reason: 'Mantén siempre una variante nueva compitiendo contra la ganadora.',
@@ -83,6 +87,7 @@ export function abRecommendations(groups, { minSends = AB_MIN_SENDS } = {}) {
         type: 'collect',
         step_number: g.step_number,
         segment: g.segment,
+        persona_id: g.persona_id ?? null,
         title: `${where}: sin diferencia significativa todavía`,
         reason: 'Las variantes rinden parecido; sigue enviando para separar ganadora y perdedoras.',
       });

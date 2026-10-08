@@ -190,6 +190,22 @@ CREATE TABLE IF NOT EXISTS brands (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
+-- Buyer personas per brand: each role buys for a different reason, so each gets its own
+-- argument (motivation, problem in its language, value argument, proof and ask).
+CREATE TABLE IF NOT EXISTS personas (
+  id INTEGER PRIMARY KEY,
+  brand_id INTEGER NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  match_titles TEXT NOT NULL DEFAULT '',   -- title keywords that identify the persona
+  motivation TEXT NOT NULL DEFAULT '',     -- what they care about / how they are measured
+  problem TEXT NOT NULL DEFAULT '',        -- the problem in their language ({{problema}})
+  argument TEXT NOT NULL DEFAULT '',       -- how the brand helps them specifically
+  proof TEXT NOT NULL DEFAULT '',          -- relevant evidence for this role
+  cta TEXT NOT NULL DEFAULT '',            -- the ask that fits their level ({{cta}})
+  avoid TEXT NOT NULL DEFAULT '',          -- what not to say to this role
+  position INTEGER NOT NULL DEFAULT 0
+);
+
 -- Accounts: outreach works per company, not just per address.
 CREATE TABLE IF NOT EXISTS companies (
   id INTEGER PRIMARY KEY,
@@ -313,6 +329,7 @@ const ADDED_COLUMNS = {
   },
   variants: {
     segment_id: 'INTEGER REFERENCES segments(id) ON DELETE SET NULL',
+    persona_id: 'INTEGER REFERENCES personas(id) ON DELETE SET NULL',
     // active = in rotation; proposed = AI/challenger waiting for approval; paused = removed from A/B.
     status: "TEXT NOT NULL DEFAULT 'active'",
     origin: "TEXT NOT NULL DEFAULT 'manual'",
@@ -336,6 +353,14 @@ const ADDED_COLUMNS = {
     // ready = Apto para campaña; research = Requiere investigación; excluded = Excluido de campaña.
     lead_status: "TEXT NOT NULL DEFAULT 'research'",
     lead_status_reasons: "TEXT NOT NULL DEFAULT ''",
+    persona_id: 'INTEGER REFERENCES personas(id) ON DELETE SET NULL',
+  },
+  drafts: {
+    persona_id: 'INTEGER REFERENCES personas(id) ON DELETE SET NULL',
+  },
+  messages: {
+    persona_id: 'INTEGER REFERENCES personas(id) ON DELETE SET NULL',
+    problem_id: 'INTEGER REFERENCES snippets(id) ON DELETE SET NULL',
   },
 };
 
