@@ -35,6 +35,11 @@ export function createApp({ db, scheduler, gmailFor, decideFn, now } = {}) {
     }),
   );
 
+  app.get('/healthz', (req, res) => {
+    db.prepare('SELECT 1').get();
+    res.json({ ok: true });
+  });
+
   // Public endpoints: tracking pixel and unsubscribe.
   app.use(trackingRoutes(db, { now }));
 

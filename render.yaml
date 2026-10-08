@@ -1,0 +1,29 @@
+# Render Blueprint: New > Blueprint > select this repo.
+# A persistent disk requires a paid instance (Starter or higher).
+services:
+  - type: web
+    name: gru-outreach
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    # Only one instance: the scheduler runs inside the process.
+    numInstances: 1
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_PATH
+        value: /data/outreach.db
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: TYPESAFE_API_KEY
+        sync: false
+      - key: ALLOWED_GOOGLE_DOMAINS
+        sync: false

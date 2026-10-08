@@ -20,7 +20,13 @@ export const config = {
   isTest,
   port: Number(env.PORT || 3000),
   // Public URL used in tracking pixels, unsubscribe links and the Google OAuth redirect.
-  baseUrl: (env.BASE_URL || 'http://localhost:3000').replace(/\/+$/, ''),
+  // Render and Railway expose the public URL; BASE_URL always wins when set.
+  baseUrl: (
+    env.BASE_URL ||
+    env.RENDER_EXTERNAL_URL ||
+    (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : '') ||
+    'http://localhost:3000'
+  ).replace(/\/+$/, ''),
   databasePath: env.DATABASE_PATH || (isTest ? ':memory:' : 'data/outreach.db'),
 
   jwtSecret: required('JWT_SECRET', 'test-jwt-secret'),

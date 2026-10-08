@@ -61,11 +61,27 @@ Crea tu cuenta en `/#/register` y luego pon `ALLOW_REGISTRATION=false`.
 
 Pide acceso en [typesafe.ai](https://typesafe.ai) y pon la clave en `TYPESAFE_API_KEY` (modelo por defecto `jev-latest`). El badge superior de la UI indica si Jev está activo.
 
-### 4. Producción
+### 4. Deploy (Render o Railway)
 
-- `BASE_URL` debe ser **público y HTTPS**: lo usan el pixel de aperturas, los enlaces de baja y el redirect de OAuth.
-- La base de datos es SQLite (`DATABASE_PATH`); monta un volumen persistente y respáldalo.
+La app necesita **un servidor siempre encendido** (el scheduler revisa cada 30 s qué correos tocan) y **disco persistente** para la base SQLite. Por eso **no funciona en Vercel** ni en otras plataformas serverless: el disco es de solo lectura/efímero y no hay procesos permanentes (da `500 FUNCTION_INVOCATION_FAILED`).
+
+**Render (recomendado)**
+1. En Render: **New → Blueprint** y elige este repositorio. Usa `render.yaml`: plan Starter, disco de 1 GB en `/data`, `JWT_SECRET` y `ENCRYPTION_KEY` generados automáticamente.
+2. Completa `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TYPESAFE_API_KEY` (y opcionalmente `ALLOWED_GOOGLE_DOMAINS`).
+3. La URL pública se detecta sola (`RENDER_EXTERNAL_URL`). Si usas dominio propio, define `BASE_URL=https://tu-dominio`.
+4. En Google Cloud agrega el redirect `https://<tu-app>.onrender.com/api/senders/google/callback`.
+
+**Railway**
+1. **New Project → Deploy from GitHub repo** (usa `Dockerfile` y `railway.json`).
+2. Agrega un **Volume** montado en `/data`.
+3. Variables: `JWT_SECRET` y `ENCRYPTION_KEY` (genera cada una con `openssl rand -hex 32`), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TYPESAFE_API_KEY`.
+4. **Settings → Networking → Generate Domain**. La URL se detecta sola (`RAILWAY_PUBLIC_DOMAIN`). Agrega el redirect de Google como arriba.
+
+Notas:
 - Ejecuta **una sola instancia** (el scheduler corre dentro del proceso).
+- La URL pública debe ser **HTTPS**: la usan el pixel de aperturas, los enlaces de baja y el redirect de OAuth.
+- `GET /healthz` responde `{"ok":true}` para los health checks. Respalda `/data/outreach.db` periódicamente.
+- Si ya creaste el proyecto en Vercel, puedes eliminarlo o desconectarlo del repositorio para que no siga intentando desplegar.
 
 ## Flujo de uso
 
