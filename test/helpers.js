@@ -40,7 +40,10 @@ export function decodeBodies(mime) {
   return parts.map((p) => Buffer.from(p[1].replace(/\r\n/g, ''), 'base64').toString('utf8'));
 }
 
-export function setup({ decideFn, classifyFn, start = '2026-10-07T15:00:00Z' } = {}) {
+/** MX checker double: every domain receives mail except the ones listed. */
+export const fakeMx = (deadDomains = []) => async (domain) => (deadDomains.includes(domain) ? 'none' : 'ok');
+
+export function setup({ decideFn, analyzeFn, classifyFn, deadDomains = [], start = '2026-10-07T15:00:00Z' } = {}) {
   const db = openDatabase(':memory:');
   const gmail = fakeGmail();
   const clock = { now: new Date(start) };
@@ -52,9 +55,10 @@ export function setup({ decideFn, classifyFn, start = '2026-10-07T15:00:00Z' } =
     log: { warn() {}, error() {} },
     random: () => 0,
     ...(decideFn ? { decideFn } : {}),
+    ...(analyzeFn ? { analyzeFn } : {}),
     ...(classifyFn ? { classifyFn } : {}),
   });
-  const app = createApp({ db, scheduler, gmailFor: () => gmail.api, now, ...(decideFn ? { decideFn } : {}) });
+  const app = createApp({ db, scheduler, gmailFor: () => gmail.api, now, decideFn, analyzeFn, mx: fakeMx(deadDomains) });
   return { db, app, gmail, clock, scheduler };
 }
 

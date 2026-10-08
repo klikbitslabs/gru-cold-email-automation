@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import './helpers.js';
-import { parseProspectsCsv } from '../src/lib/csv.js';
-import { lintEmail } from '../src/lib/lint.js';
+import ExcelJS from 'exceljs';
+import { parseProspectsCsv, parseProspectsFile } from '../src/lib/csv.js';
+import { checkBody, checkDraft, checkSubject, lintTemplate } from '../src/lib/quality.js';
+import { validateLead } from '../src/lib/validate.js';
 import { buildMime, encodeHeader } from '../src/lib/mime.js';
 import { buildEmailBody, renderTemplate, sanitizeSignature } from '../src/lib/template.js';
 import { inSendWindow, localParts, nextLocalSlot } from '../src/lib/time.js';
-import { decide, ruleClassifyReply, slotRanges } from '../src/services/jev.js';
+import { analyzeProspect, decide, ruleAnalysis, ruleClassifyReply, slotRanges } from '../src/services/jev.js';
 
 test('CSV import maps Spanish headers, semicolons and keeps custom fields', () => {
   const csv = 'Nombre;Apellido;Correo;Empresa;Cargo;Ciudad\nAna;Pérez;ANA@EJEMPLO.COM;Ejemplo SA;CEO;Panamá\nMal;Dato;no-es-email;X;Y;Z\n';
@@ -14,9 +16,26 @@ test('CSV import maps Spanish headers, semicolons and keeps custom fields', () =
   assert.equal(out.prospects.length, 1);
   assert.deepEqual(out.prospects[0], {
     email: 'ana@ejemplo.com', first_name: 'Ana', last_name: 'Pérez', company: 'Ejemplo SA', title: 'CEO', fields: { ciudad: 'Panamá' },
+    industry: '', country: '', phone: '', linkedin_url: '', source: '', lawful_basis: '',
   });
   assert.equal(out.invalid.length, 1);
   assert.equal(out.invalid[0].row, 3);
+});
+
+test('Excel (.xlsx) import maps the first sheet, including industry, phone and LinkedIn', async () => {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Contactos');
+  ws.addRow(['Nombre', 'Correo electrónico', 'Empresa', 'Sector', 'Teléfono', 'LinkedIn', 'Noticia reciente']);
+  ws.addRow(['Ana', 'ana@ejemplo.com', 'Ejemplo SA', 'Retail', '+507 6000-0000', 'https://linkedin.com/in/ana', 'abrió 3 tiendas']);
+  ws.addRow([]);
+  const out = await parseProspectsFile(Buffer.from(await wb.xlsx.writeBuffer()), { filename: 'base.xlsx' });
+  assert.equal(out.prospects.length, 1);
+  assert.equal(out.mapping.email, 'correo_electronico');
+  assert.deepEqual(
+    [out.prospects[0].industry, out.prospects[0].phone, out.prospects[0].linkedin_url, out.prospects[0].fields.noticia_reciente],
+    ['Retail', '+507 6000-0000', 'https://linkedin.com/in/ana', 'abrió 3 tiendas'],
+  );
+  await assert.rejects(parseProspectsFile(Buffer.from('x'), { filename: 'viejo.xls' }), /\.xls antiguo/);
 });
 
 test('CSV without an email column is rejected', () => {
@@ -50,13 +69,58 @@ test('MIME encodes UTF-8 subjects and threads replies', () => {
   assert.match(mime, /multipart\/alternative/);
 });
 
-test('linter flags long, salesy, link-heavy first emails', () => {
-  const body = `${'palabra '.repeat(140)} gratis https://a.com https://b.com ¿agendamos una llamada de 30 min?`;
-  const codes = lintEmail({ subject: 'OFERTA INCREÍBLE PARA TU EMPRESA HOY MISMO!!!', body, stepNumber: 1 }).warnings.map((w) => w.code);
-  for (const code of ['too_long', 'long_subject', 'shouty_subject', 'spam_words', 'links', 'no_personalization', 'big_ask']) {
-    assert.ok(codes.includes(code), code);
-  }
-  assert.deepEqual(lintEmail({ subject: 'idea para {{company}}', body: 'Hola {{first_name}}, vi que {{company}} está contratando vendedores. ¿Te interesa?', stepNumber: 1 }).warnings, []);
+const codes = (issues) => issues.map((i) => i.code);
+
+test('subject rules: 3–7 words, no caps blocks, no exclamations, no emojis, no fake Re:', () => {
+  assert.deepEqual(checkSubject('idea para el equipo comercial'), []);
+  assert.deepEqual(codes(checkSubject('hola')), ['subject_length']);
+  assert.ok(codes(checkSubject('OFERTA para tu empresa hoy')).includes('subject_caps'));
+  assert.deepEqual(codes(checkSubject('reunión con el CEO de ventas')), []); // acronyms are fine
+  assert.ok(codes(checkSubject('pregunta rápida sobre ventas!!')).includes('subject_exclamation'));
+  assert.ok(codes(checkSubject('pregunta rápida sobre ventas??')).includes('subject_punctuation'));
+  assert.deepEqual(checkSubject('pregunta sobre su equipo 🚀').find((i) => i.code === 'subject_emoji').severity, 'error');
+  assert.equal(checkSubject('Re: propuesta para su equipo').find((i) => i.code === 'fake_reply').severity, 'error');
+  assert.deepEqual(checkSubject('Re: propuesta para su equipo', { threadReply: true }), []);
+  assert.ok(codes(checkSubject('oferta exclusiva para tu equipo')).includes('subject_hype'));
+});
+
+test('body rules: 45–85 words, warning from 110, 3 paragraphs, one CTA, no links in first email', () => {
+  const para = (n) => Array.from({ length: n }, (_, i) => `palabra${i}`).join(' ');
+  const good = `Hola Ana,\n\n${para(20)}.\n\n${para(20)}.\n\n¿Tiene sentido conversarlo?`;
+  assert.deepEqual(codes(checkBody(good, { personalized: true })), []);
+  assert.ok(codes(checkBody(`${para(60)}\n\n${para(50)}\n\n¿Te interesa?`, { personalized: true })).includes('too_long'));
+  assert.deepEqual(codes(checkBody(`${para(50)}\n\n${para(40)}\n\n¿Te interesa?`, { personalized: true })), ['above_target']);
+  assert.ok(codes(checkBody(`${para(30)} ${para(20)} ¿Te interesa?`, { personalized: true })).includes('structure'));
+  assert.ok(codes(checkBody(`${para(20)}\n\n${para(20)}\n\n¿Te interesa? ¿Hablamos el jueves?`, { personalized: true })).includes('many_ctas'));
+  const link = checkBody(`${para(20)}\n\nmira https://x.com\n\n¿Te interesa?`, { personalized: true }).find((i) => i.code === 'links_first_email');
+  assert.equal(link.severity, 'error');
+  assert.equal(checkBody(`${para(20)}\n\nmira https://x.com\n\n¿Te interesa?`, { stepNumber: 2, personalized: true }).some((i) => i.code === 'links_first_email'), false);
+  assert.ok(codes(checkBody(good, { personalized: false })).includes('personalization'));
+});
+
+test('template lint recognises {{gancho}} as personalization and {{cta}} as the call to action', () => {
+  const { issues } = lintTemplate({ subject: 'idea para {{company}}', body: 'Hola {{first_name}},\n\n{{gancho}}\n\n{{problema}}\n\n{{cta}}' });
+  assert.deepEqual(codes(issues), []);
+  assert.ok(codes(lintTemplate({ subject: 'idea para {{company}}', body: 'Hola {{first_name}}, trabajamos con {{company}}. {{cta}}' }).issues).includes('personalization'));
+});
+
+test('draft check blocks missing data, missing signature and invalid leads; warns on risky leads', () => {
+  const base = { subject: 'idea para su equipo comercial', body: 'x', stepNumber: 2, personalized: true, sender: { display_name: 'Laura', signature_html: '<p>Laura</p>' } };
+  assert.equal(checkDraft({ ...base, missing: ['ciudad'] }).passed, false);
+  assert.equal(checkDraft({ ...base, sender: { display_name: '', signature_html: '' } }).passed, false);
+  assert.equal(checkDraft({ ...base, prospect: { validation_status: 'invalid', validation_notes: 'sin MX' } }).passed, false);
+  const risky = checkDraft({ ...base, prospect: { validation_status: 'risky', validation_notes: 'cuenta genérica' } });
+  assert.equal(risky.passed, true);
+  assert.ok(risky.issues.some((i) => i.code === 'risky_lead'));
+});
+
+test('lead validation: MX, disposable, role and personal addresses', async () => {
+  const mx = async (domain) => (domain === 'muerto.com' ? 'none' : 'ok');
+  assert.deepEqual(await validateLead({ email: 'ana@empresa.com', first_name: 'Ana', company: 'Empresa' }, { mx }), { status: 'valid', notes: [] });
+  assert.equal((await validateLead({ email: 'ana@muerto.com', first_name: 'Ana', company: 'X' }, { mx })).status, 'invalid');
+  assert.equal((await validateLead({ email: 'a@mailinator.com', first_name: 'A', company: 'X' }, { mx })).status, 'invalid');
+  assert.equal((await validateLead({ email: 'info@empresa.com', first_name: 'A', company: 'X' }, { mx })).status, 'risky');
+  assert.equal((await validateLead({ email: 'ana.perez@gmail.com', first_name: 'Ana' }, { mx })).status, 'risky');
 });
 
 test('send window and slots respect the campaign time zone', () => {
@@ -96,24 +160,20 @@ test('decide() maps Jev answers to an action and falls back to rules on error', 
         model: 'jev-test',
         usage: { input_tokens: 10, output_tokens: 0 },
         answers: {
-          stop: { type: 'noul', noul: 0.1 },
           send_slot: { type: 'choice', choice: 'late', confidence: 0.8, probabilities: {} },
           variant: { type: 'choice', choice: 'v12', confidence: 0.7, probabilities: { v11: 0.3, v12: 0.7 } },
           cta: { type: 'choice', choice: 'c22', confidence: 0.9, probabilities: {} },
-          fit: { type: 'score', score: 3, confidence: 0.8, probabilities: {} },
         },
       };
     },
   };
   const d = await decide(ctx, { client });
   assert.equal(d.engine, 'jev');
-  assert.deepEqual([d.action, d.variantId, d.ctaId, d.slot, d.fitScore], ['send', 12, 22, 'late', 0.75]);
-  assert.deepEqual(Object.keys(sent.questions).sort(), ['cta', 'fit', 'send_slot', 'stop', 'variant']);
+  assert.deepEqual([d.action, d.variantId, d.ctaId, d.slot], ['send', 12, 22, 'late']);
+  assert.deepEqual(Object.keys(sent.questions).sort(), ['cta', 'send_slot', 'variant']);
   assert.equal(sent.questions.variant.type, 'choice');
   assert.ok(sent.state.candidate_messages.v11);
 
-  const stop = await decide(ctx, { client: { systemOne: async () => ({ model: 'm', usage: {}, answers: { stop: { noul: 0.95 } } }) } });
-  assert.equal(stop.action, 'stop');
 
   const failed = await decide(ctx, { client: { systemOne: async () => { throw new Error('boom'); } } });
   assert.equal(failed.engine, 'rules');

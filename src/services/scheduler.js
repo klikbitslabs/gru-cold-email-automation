@@ -1,15 +1,26 @@
+// Commercial orchestrator. Every tick:
+//   1. checkReplies   — replies, bounces and auto-replies on active threads (Gmail).
+//   2. analyzeLeads   — commercial intelligence for new leads (segment, ICP fit, exclusion).
+//   3. per active campaign, for each due prospect:
+//        email step  → draft (decision + generation + quality control) → approval queue or
+//                      auto-approve → send inside the window with per-sender limits/pacing.
+//        call/LinkedIn step → task for a person; the sequence continues when it is completed.
+
 import { config } from '../config.js';
 import { nowIso } from '../db.js';
 import { decrypt, randomToken } from '../lib/crypto.js';
 import { buildMime, formatAddress, toBase64Url } from '../lib/mime.js';
-import { buildEmailBody, prospectVariables, renderTemplate } from '../lib/template.js';
+import { checkDraft } from '../lib/quality.js';
+import { allFieldsPresent, buildEmailBody, prospectVariables, renderTemplate, templateFields } from '../lib/template.js';
 import { addDays, inSendWindow, localParts, nextLocalSlot } from '../lib/time.js';
 import { extractEmail, gmailForRefreshToken } from './google.js';
-import { classifyReply, decide, slotForMinute, slotRanges } from './jev.js';
+import { analyzeProspect, classifyReply, decide, slotForMinute, slotRanges } from './jev.js';
 
 const DAY_MS = 86400000;
 // Only credential problems disable a sender; 403/429 rate limits are retried on the next tick.
 const AUTH_ERROR_RE = /invalid_grant|invalid credentials|insufficient (permission|authentication scopes)|unauthorized_client|\b401\b/i;
+const OUTCOME_RANK = { interested: 1, meeting: 2, opportunity: 3, won: 4, lost: 0 };
+const TRIVIAL_FIELDS = new Set(['first_name', 'last_name', 'full_name', 'email', 'company', 'sender_name', 'sender_first_name', 'sender_email', 'cta', 'problema', 'gancho']);
 
 export function trackingPixelUrl(token) {
   return `${config.baseUrl}/t/o/${token}.gif`;
@@ -22,7 +33,15 @@ export function unsubscribeUrl(token) {
 export function loadSequence(db, campaignId) {
   const steps = db.prepare('SELECT * FROM steps WHERE campaign_id = ? ORDER BY step_number').all(campaignId);
   const variantsStmt = db.prepare('SELECT * FROM variants WHERE step_id = ? ORDER BY id');
-  return steps.map((s) => ({ ...s, variants: variantsStmt.all(s.id) }));
+  return steps.map((s) => ({ ...s, channel: s.channel || 'email', variants: variantsStmt.all(s.id) }));
+}
+
+/** Items meant for this prospect's segment: segment-specific ones when they exist, else generic ones. */
+export function forSegment(items, segmentId) {
+  const specific = items.filter((i) => segmentId && i.segment_id === segmentId);
+  if (specific.length) return specific;
+  const generic = items.filter((i) => !i.segment_id);
+  return generic.length ? generic : items;
 }
 
 /** Engagement facts for a prospect, consumed by the decision engine. */
@@ -34,6 +53,7 @@ export function engagementFor(db, prospect, campaign, now) {
        WHERE m.prospect_id = ? AND oe.suspected_bot = 0 ORDER BY oe.opened_at`,
     )
     .all(prospect.id);
+  const tasks = db.prepare("SELECT channel, outcome FROM tasks WHERE prospect_id = ? AND status != 'open'").all(prospect.id);
   const ranges = slotRanges(campaign.window_start, campaign.window_end);
   const daysAgo = (iso) => (iso ? Number(((now - new Date(iso)) / DAY_MS).toFixed(1)) : null);
   const last = messages[messages.length - 1];
@@ -43,49 +63,121 @@ export function engagementFor(db, prospect, campaign, now) {
     opened_last_email: last ? last.open_count > 0 : false,
     human_opens_total: opens.length,
     last_open_days_ago: opens.length ? daysAgo(opens[opens.length - 1].opened_at) : null,
-    previous_emails: messages.map((m) => ({
-      step: m.step_number,
-      opens: m.open_count,
-      last_opened_days_ago: daysAgo(m.last_opened_at),
-    })),
+    previous_emails: messages.map((m) => ({ step: m.step_number, opens: m.open_count, last_opened_days_ago: daysAgo(m.last_opened_at) })),
     previous_open_slots: opens
       .map((o) => slotForMinute(ranges, localParts(new Date(o.opened_at), campaign.timezone).minuteOfDay))
       .filter(Boolean),
+    other_touches: tasks.map((t) => ({ channel: t.channel, outcome: t.outcome })),
   };
 }
 
-/**
- * Renders the email for a prospect/step/variant. Shared by the scheduler and the preview endpoint.
- * @returns {{ subject, body, missing: string[], cta }}
- */
-export function renderStep({ prospect, sender, variant, cta, step, threadSubject, fallbackSubject }) {
-  const senderName = sender?.display_name || '';
-  const baseVars = prospectVariables(prospect, {
-    sender_name: senderName,
-    sender_first_name: senderName.split(' ')[0] || '',
-    sender_email: sender?.email || '',
-  });
-  const ctaRendered = cta ? renderTemplate(cta.text, baseVars) : { text: '', missing: [] };
-  const vars = { ...baseVars, cta: ctaRendered.text };
+/** Results per variant and per CTA in a campaign — the learning signal fed back to Jev. */
+export function performanceStats(db, campaignId) {
+  const rows = (column) =>
+    db.prepare(
+      `SELECT m.${column} AS id, COUNT(*) AS sent,
+         SUM(CASE WHEN p.status = 'replied' AND p.reply_category != 'bounce'
+                   AND m.step_number = (SELECT MAX(step_number) FROM messages m2 WHERE m2.prospect_id = p.id) THEN 1 ELSE 0 END) AS replied,
+         SUM(CASE WHEN (p.reply_category IN ('interested','referral') OR p.outcome IN ('interested','meeting','opportunity','won'))
+                   AND m.step_number = (SELECT MAX(step_number) FROM messages m2 WHERE m2.prospect_id = p.id) THEN 1 ELSE 0 END) AS positive
+       FROM messages m JOIN prospects p ON p.id = m.prospect_id
+       WHERE m.campaign_id = ? AND m.${column} IS NOT NULL GROUP BY m.${column}`,
+    ).all(campaignId);
+  const toMap = (list) => new Map(list.map((r) => [r.id, r]));
+  return { variants: toMap(rows('variant_id')), ctas: toMap(rows('cta_id')) };
+}
+
+function senderVars(sender) {
+  const name = sender?.display_name || '';
+  return { sender_name: name, sender_first_name: name.split(' ')[0] || '', sender_email: sender?.email || '' };
+}
+
+/** Renders the hook/problem/CTA snippets and the variant for a prospect. */
+export function renderDraft({ prospect, sender, variant, cta, hook, problem, step, threadSubject, fallbackSubject }) {
+  const baseVars = prospectVariables(prospect, senderVars(sender));
+  const parts = {};
+  const missing = [];
+  for (const [key, snippet] of [['gancho', hook], ['problema', problem], ['cta', cta]]) {
+    const r = snippet ? renderTemplate(snippet.text, baseVars) : { text: '', missing: [] };
+    parts[key] = r.text;
+    missing.push(...r.missing);
+  }
+  const vars = { ...baseVars, ...parts };
   const body = renderTemplate(variant.body, vars);
-  const sameThread = step.step_number > 1 && step.same_thread && threadSubject;
+  const usedFields = templateFields(variant.body);
+  const reasons = { gancho: 'gancho (ningún gancho tiene todos sus datos para este prospecto)', problema: 'problema (no hay hipótesis para su segmento)', cta: 'cta (no hay CTAs)' };
+  for (const key of ['gancho', 'problema', 'cta']) {
+    if (usedFields.includes(key) && !parts[key]) missing.push(reasons[key]);
+  }
+  const sameThread = step.step_number > 1 && Boolean(step.same_thread) && Boolean(threadSubject);
   let subject;
   if (sameThread) subject = { text: /^re:/i.test(threadSubject) ? threadSubject : `Re: ${threadSubject}`, missing: [] };
   else if (variant.subject?.trim()) subject = renderTemplate(variant.subject, vars);
   // Follow-up without its own subject that cannot be threaded: reuse the original subject.
   else subject = { text: fallbackSubject || '', missing: [] };
+
+  const personalFields = usedFields.filter((f) => !TRIVIAL_FIELDS.has(f) && vars[f]);
   return {
     subject: subject.text,
     body: body.text,
-    missing: [...new Set([...body.missing, ...subject.missing, ...ctaRendered.missing])],
-    sameThread: Boolean(sameThread),
+    missing: [...new Set([...body.missing, ...subject.missing, ...missing])],
+    sameThread,
+    personalized: Boolean((hook && usedFields.includes('gancho')) || personalFields.length),
   };
+}
+
+/** Candidate copy for a prospect at a step: variants, hooks (only verifiable ones), problems, CTAs. */
+export function candidatesFor(db, { campaign, prospect, step, sender }) {
+  const vars = prospectVariables(prospect, senderVars(sender));
+  const snippets = db.prepare('SELECT * FROM snippets WHERE campaign_id = ? ORDER BY id').all(campaign.id);
+  const segmentItems = (list) => list.filter((i) => !i.segment_id || i.segment_id === prospect.segment_id);
+  const hooks = segmentItems(snippets.filter((s) => s.kind === 'hook')).filter((h) => allFieldsPresent(h.text, vars));
+  const problems = segmentItems(snippets.filter((s) => s.kind === 'problem'));
+  const preview = (s) => ({ ...s, preview: renderTemplate(s.text, vars).text });
+  return {
+    variants: forSegment(step.variants, prospect.segment_id),
+    hooks: hooks.map(preview),
+    problems: problems.map(preview),
+    ctas: db.prepare('SELECT * FROM ctas WHERE campaign_id = ? ORDER BY id').all(campaign.id),
+  };
+}
+
+export function needsApproval(mode, stepNumber, quality) {
+  if (!quality.passed) return true; // errors always need a person
+  if (mode === 'all') return true;
+  if (mode === 'first' && stepNumber === 1) return true;
+  return mode !== 'none' && quality.warnings > 0;
+}
+
+/** Schedules the step after `stepNumber` (any channel) or finishes the sequence. */
+export function advanceProspect(db, prospect, sequence, stepNumber, at) {
+  const next = sequence.find((s) => s.step_number === stepNumber + 1);
+  const fields = next
+    ? { current_step: stepNumber, status: 'active', next_send_at: nowIso(addDays(at, Math.max(1, next.delay_days))), postponed_step: null }
+    : { current_step: stepNumber, status: 'finished', next_send_at: null, postponed_step: null };
+  db.prepare(
+    'UPDATE prospects SET current_step = @current_step, status = @status, next_send_at = @next_send_at, postponed_step = @postponed_step WHERE id = @id',
+  ).run({ ...fields, id: prospect.id });
+}
+
+/** Records a commercial outcome; positive outcomes stop the sequence. Never downgrades. */
+export function setOutcome(db, prospect, outcome, at = new Date()) {
+  const current = OUTCOME_RANK[prospect.outcome] ?? -1;
+  if (outcome !== 'lost' && prospect.outcome && current >= OUTCOME_RANK[outcome]) return;
+  db.prepare(
+    `UPDATE prospects SET outcome = ?, outcome_at = ?,
+       status = CASE WHEN status IN ('active','finished','stopped') THEN 'replied' ELSE status END,
+       next_send_at = NULL,
+       stop_reason = COALESCE(stop_reason, ?)
+     WHERE id = ?`,
+  ).run(outcome, nowIso(at), `Resultado: ${outcome}`, prospect.id);
 }
 
 export function createScheduler({
   db,
   gmailFor = (sender) => gmailForRefreshToken(decrypt(sender.refresh_token_enc)),
   decideFn = decide,
+  analyzeFn = analyzeProspect,
   classifyFn = classifyReply,
   now = () => new Date(),
   log = console,
@@ -97,15 +189,16 @@ export function createScheduler({
       `SELECT s.* FROM senders s JOIN campaign_senders cs ON cs.sender_id = s.id
        WHERE cs.campaign_id = ? AND s.status = 'active' ORDER BY s.id`,
     ),
-    ctas: db.prepare('SELECT * FROM ctas WHERE campaign_id = ? ORDER BY id'),
     due: db.prepare(
-      `SELECT * FROM prospects WHERE campaign_id = ? AND status = 'active' AND next_send_at IS NOT NULL AND next_send_at <= ?
+      `SELECT * FROM prospects WHERE campaign_id = ? AND status = 'active' AND intel_at IS NOT NULL
+         AND next_send_at IS NOT NULL AND next_send_at <= ?
        ORDER BY current_step DESC, fit_score IS NULL, fit_score DESC, next_send_at ASC LIMIT 200`,
     ),
     sentLast24h: db.prepare('SELECT COUNT(*) AS n FROM messages WHERE sender_id = ? AND sent_at > ?'),
     suppressed: db.prepare('SELECT 1 FROM suppressions WHERE user_id = ? AND email = ?'),
     sender: db.prepare('SELECT * FROM senders WHERE id = ?'),
     lastMessage: db.prepare('SELECT * FROM messages WHERE prospect_id = ? ORDER BY step_number DESC LIMIT 1'),
+    openDraft: db.prepare("SELECT * FROM drafts WHERE prospect_id = ? AND step_number = ? AND status IN ('pending','approved') ORDER BY id DESC LIMIT 1"),
     logDecision: db.prepare(
       'INSERT INTO decisions (prospect_id, step_number, engine, action, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
     ),
@@ -118,8 +211,7 @@ export function createScheduler({
 
   function senderCapacity(sender, at) {
     const since = new Date(at.getTime() - DAY_MS).toISOString();
-    const sent = stmts.sentLast24h.get(sender.id, since).n;
-    return sender.daily_limit - sent;
+    return sender.daily_limit - stmts.sentLast24h.get(sender.id, since).n;
   }
 
   function senderReady(sender, at) {
@@ -139,7 +231,7 @@ export function createScheduler({
   }
 
   // -------------------------------------------------------------------------
-  // Reply / bounce detection
+  // 1. Replies / bounces
   // -------------------------------------------------------------------------
   async function scanReplies(prospect, campaign, sender) {
     const gmail = gmailFor(sender);
@@ -174,6 +266,12 @@ export function createScheduler({
       }
     }
     setProspect(prospect.id, update);
+    if (outcome === 'interested') setOutcome(db, { ...prospect, ...update }, 'interested', now());
+    if (outcome && outcome !== 'bounce') {
+      // A reply makes any pending draft or task for this prospect obsolete.
+      db.prepare("UPDATE drafts SET status = 'rejected', reviewed_at = ? WHERE prospect_id = ? AND status IN ('pending','approved')").run(nowIso(now()), prospect.id);
+      db.prepare("UPDATE tasks SET status = 'skipped', note = 'El prospecto respondió', completed_at = ? WHERE prospect_id = ? AND status = 'open'").run(nowIso(now()), prospect.id);
+    }
     return outcome;
   }
 
@@ -183,7 +281,7 @@ export function createScheduler({
     const recent = new Date(at.getTime() - 30 * DAY_MS).toISOString();
     const rows = db
       .prepare(
-        `SELECT p.*, c.id AS c_id FROM prospects p JOIN campaigns c ON c.id = p.campaign_id
+        `SELECT p.* FROM prospects p
          WHERE p.status IN ('active','finished') AND p.thread_id IS NOT NULL AND p.sender_id IS NOT NULL
            AND (p.last_reply_check_at IS NULL OR p.last_reply_check_at < ?)
            AND EXISTS (SELECT 1 FROM messages m WHERE m.prospect_id = p.id AND m.sent_at > ?)
@@ -204,35 +302,101 @@ export function createScheduler({
   }
 
   // -------------------------------------------------------------------------
-  // Sending
+  // 2. Commercial intelligence
   // -------------------------------------------------------------------------
-  async function sendOne({ campaign, prospect, step, sender, decision, totalSteps, sequence }) {
-    const variant = step.variants.find((v) => v.id === decision.variantId) || step.variants[0];
-    const ctas = stmts.ctas.all(campaign.id);
-    const cta = ctas.find((c) => c.id === decision.ctaId) || null;
-    // Only the mailbox that owns the thread can reply in it.
-    const canThread = Boolean(prospect.thread_id && prospect.sender_id === sender.id);
-    const rendered = renderStep({
-      prospect, sender, variant, cta, step,
-      threadSubject: canThread ? prospect.first_subject : null,
-      fallbackSubject: prospect.first_subject,
-    });
-    if (rendered.missing.length) {
-      setProspect(prospect.id, {
-        status: 'stopped',
-        next_send_at: null,
-        stop_reason: `Faltan campos para personalizar: ${rendered.missing.join(', ')} (usa {{campo|alternativa}})`,
-      });
-      return false;
-    }
-    if (!rendered.subject) {
-      setProspect(prospect.id, { status: 'stopped', next_send_at: null, stop_reason: `El paso ${step.step_number} no tiene asunto` });
-      return false;
-    }
+  async function analyzeOne(prospect, campaign) {
+    const segments = db.prepare('SELECT * FROM segments WHERE campaign_id = ? ORDER BY id').all(campaign.id);
+    const result = await analyzeFn({ campaign, prospect, segments });
+    const at = nowIso(now());
+    stmts.logDecision.run(prospect.id, 0, result.engine, result.exclude ? 'exclude' : 'analyze', JSON.stringify(result), at);
+    const update = {
+      segment_id: result.segmentId ?? null,
+      fit_score: result.fitScore ?? prospect.fit_score,
+      intel_json: JSON.stringify(result),
+      intel_at: at,
+    };
+    if (result.exclude) Object.assign(update, { status: 'stopped', next_send_at: null, stop_reason: 'Excluido por inteligencia comercial (no encaja con la oferta)' });
+    setProspect(prospect.id, update);
+    return { ...prospect, ...update };
+  }
 
+  async function analyzeLeads(limit = 25) {
+    const rows = db.prepare(
+      `SELECT p.* FROM prospects p JOIN campaigns c ON c.id = p.campaign_id
+       WHERE p.intel_at IS NULL AND p.status = 'active' AND c.status != 'completed' ORDER BY p.id LIMIT ?`,
+    ).all(limit);
+    const campaigns = new Map();
+    for (const prospect of rows) {
+      if (!campaigns.has(prospect.campaign_id)) campaigns.set(prospect.campaign_id, db.prepare('SELECT * FROM campaigns WHERE id = ?').get(prospect.campaign_id));
+      await analyzeOne(prospect, campaigns.get(prospect.campaign_id));
+    }
+    return rows.length;
+  }
+
+  // -------------------------------------------------------------------------
+  // 3a. Drafting (generation + quality control + approval routing)
+  // -------------------------------------------------------------------------
+  async function createDraft({ campaign, prospect, step, sender, totalSteps, stats }) {
+    const at = now();
+    const candidates = candidatesFor(db, { campaign, prospect, step, sender });
+    const withStats = (list, map) => list.map((x) => ({ ...x, stats: map.get(x.id) || { sent: 0, replied: 0, positive: 0 } }));
+    const canThread = Boolean(prospect.thread_id && prospect.sender_id === sender.id);
+    const threadSubject = canThread ? prospect.first_subject : null;
+    const segment = prospect.segment_id ? db.prepare('SELECT * FROM segments WHERE id = ?').get(prospect.segment_id) : null;
+
+    const decision = await decideFn({
+      campaign,
+      prospect,
+      segment,
+      stepNumber: step.step_number,
+      totalSteps,
+      engagement: engagementFor(db, prospect, campaign, at),
+      variants: withStats(candidates.variants, stats.variants).map((v) => ({
+        ...v,
+        preview: renderDraft({ prospect, sender, variant: v, step, threadSubject, fallbackSubject: prospect.first_subject }).body,
+      })),
+      ctas: withStats(candidates.ctas, stats.ctas),
+      hooks: candidates.hooks,
+      problems: candidates.problems,
+    });
+    stmts.logDecision.run(prospect.id, step.step_number, decision.engine, 'draft', JSON.stringify(decision), nowIso(at));
+
+    const pick = (list, id) => list.find((x) => x.id === id) || null;
+    const variant = pick(candidates.variants, decision.variantId) || candidates.variants[0];
+    const hook = pick(candidates.hooks, decision.hookId) || candidates.hooks[0] || null;
+    const problem = pick(candidates.problems, decision.problemId) || candidates.problems[0] || null;
+    const cta = pick(candidates.ctas, decision.ctaId) || null;
+    const rendered = renderDraft({ prospect, sender, variant, cta, hook, problem, step, threadSubject, fallbackSubject: prospect.first_subject });
+    const quality = checkDraft({
+      subject: rendered.subject,
+      body: rendered.body,
+      stepNumber: step.step_number,
+      threadReply: rendered.sameThread,
+      personalized: rendered.personalized,
+      missing: rendered.missing,
+      sender,
+      prospect,
+    });
+    quality.personalized = rendered.personalized;
+    const status = needsApproval(campaign.approval_mode || 'first', step.step_number, quality) ? 'pending' : 'approved';
+    const id = Number(db.prepare(
+      `INSERT INTO drafts (prospect_id, campaign_id, step_number, sender_id, variant_id, cta_id, hook_id, problem_id, subject, body,
+         same_thread, quality_json, decision_json, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(prospect.id, campaign.id, step.step_number, sender.id, variant.id, cta?.id ?? null, hook?.id ?? null, problem?.id ?? null,
+      rendered.subject, rendered.body, rendered.sameThread ? 1 : 0, JSON.stringify(quality), JSON.stringify(decision), status, nowIso(at)).lastInsertRowid);
+    if (status === 'pending') setProspect(prospect.id, { next_send_at: null }); // waits for approval
+    return db.prepare('SELECT * FROM drafts WHERE id = ?').get(id);
+  }
+
+  // -------------------------------------------------------------------------
+  // 3b. Sending an approved draft
+  // -------------------------------------------------------------------------
+  async function sendDraft({ campaign, prospect, step, sender, draft, sequence }) {
     const at = now();
     const token = randomToken();
-    const previous = rendered.sameThread ? stmts.lastMessage.get(prospect.id) : null;
+    const threadReply = Boolean(draft.same_thread && prospect.thread_id && prospect.sender_id === sender.id);
+    const previous = threadReply ? stmts.lastMessage.get(prospect.id) : null;
     const quoted = previous
       ? {
           header: `El ${new Date(previous.sent_at).toLocaleString('es', { timeZone: campaign.timezone, dateStyle: 'medium', timeStyle: 'short' })}, ${sender.display_name || sender.email} <${sender.email}> escribió:`,
@@ -240,8 +404,9 @@ export function createScheduler({
         }
       : null;
     const unsub = campaign.include_unsubscribe ? unsubscribeUrl(prospect.unsubscribe_token) : null;
+    const subject = threadReply || !/^re:\s*/i.test(draft.subject) ? draft.subject : draft.subject.replace(/^re:\s*/i, '');
     const { text, html } = buildEmailBody({
-      body: rendered.body,
+      body: draft.body,
       signatureHtml: sender.signature_html,
       trackingPixelUrl: campaign.track_opens ? trackingPixelUrl(token) : null,
       unsubscribeUrl: unsub,
@@ -250,16 +415,16 @@ export function createScheduler({
     const mime = buildMime({
       from: formatAddress(sender.display_name, sender.email),
       to: formatAddress([prospect.first_name, prospect.last_name].filter(Boolean).join(' '), prospect.email),
-      subject: rendered.subject,
+      subject,
       text,
       html,
-      inReplyTo: rendered.sameThread ? prospect.last_message_id_header : null,
-      references: rendered.sameThread ? prospect.last_message_id_header : null,
+      inReplyTo: threadReply ? prospect.last_message_id_header : null,
+      references: threadReply ? prospect.last_message_id_header : null,
       headers: unsub ? { 'List-Unsubscribe': `<${unsub}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } : {},
     });
 
     const gmail = gmailFor(sender);
-    const sent = await gmail.send({ raw: toBase64Url(mime), threadId: rendered.sameThread ? prospect.thread_id : null });
+    const sent = await gmail.send({ raw: toBase64Url(mime), threadId: threadReply ? prospect.thread_id : null });
     let messageIdHeader = null;
     try {
       messageIdHeader = await gmail.getMessageIdHeader(sent.id);
@@ -267,54 +432,61 @@ export function createScheduler({
       messageIdHeader = null;
     }
 
-    const nextStep = sequence.find((s) => s.step_number === step.step_number + 1);
-    const isLast = step.step_number >= totalSteps || !nextStep;
     db.transaction(() => {
       db.prepare(
         `INSERT INTO messages (prospect_id, campaign_id, sender_id, step_number, variant_id, cta_id, subject, body_text,
            gmail_message_id, gmail_thread_id, message_id_header, tracking_token, decision_json, sent_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(prospect.id, campaign.id, sender.id, step.step_number, variant.id, cta?.id ?? null, rendered.subject, rendered.body,
-        sent.id, sent.threadId, messageIdHeader, token, JSON.stringify(decision), nowIso(at));
+      ).run(prospect.id, campaign.id, sender.id, step.step_number, draft.variant_id, draft.cta_id, subject, draft.body,
+        sent.id, sent.threadId, messageIdHeader, token, draft.decision_json, nowIso(at));
+      db.prepare("UPDATE drafts SET status = 'sent' WHERE id = ?").run(draft.id);
       setProspect(prospect.id, {
-        current_step: step.step_number,
         sender_id: sender.id,
-        thread_id: rendered.sameThread ? prospect.thread_id : sent.threadId,
-        first_subject: step.step_number === 1 || !rendered.sameThread ? rendered.subject : prospect.first_subject,
+        thread_id: threadReply ? prospect.thread_id : sent.threadId,
+        first_subject: threadReply ? prospect.first_subject : subject,
         last_message_id_header: messageIdHeader || prospect.last_message_id_header,
-        status: isLast ? 'finished' : 'active',
-        next_send_at: isLast ? null : nowIso(addDays(at, Math.max(1, nextStep.delay_days))),
-        pending_decision_json: null,
-        postponed_step: null,
         last_error: null,
-        fit_score: decision.fitScore ?? prospect.fit_score,
       });
+      advanceProspect(db, prospect, sequence, step.step_number, at);
       db.prepare('UPDATE senders SET last_sent_at = ?, last_error = NULL WHERE id = ?').run(nowIso(at), sender.id);
     })();
     sender.last_sent_at = nowIso(at);
-    return true;
   }
 
+  // -------------------------------------------------------------------------
+  // 3c. Tasks for call / LinkedIn steps
+  // -------------------------------------------------------------------------
+  function createTask({ campaign, prospect, step, senders }) {
+    const exists = db.prepare("SELECT 1 FROM tasks WHERE prospect_id = ? AND step_number = ? AND status = 'open'").get(prospect.id, step.step_number);
+    if (!exists) {
+      const variant = forSegment(step.variants, prospect.segment_id)[0];
+      const sender = (prospect.sender_id && stmts.sender.get(prospect.sender_id)) || senders[0] || null;
+      const vars = prospectVariables(prospect, senderVars(sender));
+      const instructions = variant ? renderTemplate(variant.body, vars).text : '';
+      db.prepare('INSERT INTO tasks (prospect_id, campaign_id, step_number, channel, instructions, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(prospect.id, campaign.id, step.step_number, step.channel, instructions, nowIso(now()));
+    }
+    setProspect(prospect.id, { next_send_at: null });
+  }
+
+  // -------------------------------------------------------------------------
+  // 3. Per-campaign orchestration
+  // -------------------------------------------------------------------------
   async function processCampaign(campaign, usedSenders) {
     const at = now();
-    if (!inSendWindow(campaign, at)) return 0;
     const senders = stmts.campaignSenders.all(campaign.id);
-    if (!senders.length) return 0;
     const sequence = loadSequence(db, campaign.id).filter((s) => s.variants.length);
-    const totalSteps = Math.min(sequence.length, config.sequence.maxSteps);
-    if (!totalSteps) return 0;
-    const ctas = stmts.ctas.all(campaign.id);
+    if (!sequence.length) return 0;
+    const sendingOpen = inSendWindow(campaign, at);
     const ranges = slotRanges(campaign.window_start, campaign.window_end);
     const currentSlot = slotForMinute(ranges, localParts(at, campaign.timezone).minuteOfDay);
+    const stats = performanceStats(db, campaign.id);
 
     let sentCount = 0;
     for (const prospect of stmts.due.all(campaign.id, nowIso(at))) {
-      const available = senders.filter((s) => !usedSenders.has(s.id) && senderReady(s, at) && senderCapacity(s, at) > 0);
-      if (!available.length) break;
-
-      const nextNumber = prospect.current_step + 1;
-      const step = sequence.find((s) => s.step_number === nextNumber);
-      if (!step || nextNumber > totalSteps) {
+      const stepNumber = prospect.current_step + 1;
+      const step = sequence.find((s) => s.step_number === stepNumber);
+      if (!step) {
         setProspect(prospect.id, { status: 'finished', next_send_at: null });
         continue;
       }
@@ -322,77 +494,55 @@ export function createScheduler({
         setProspect(prospect.id, { status: 'unsubscribed', next_send_at: null, stop_reason: 'En lista de supresión' });
         continue;
       }
-
-      // Sticky sender: follow-ups always come from the mailbox that sent step 1.
-      let sender = null;
-      if (prospect.sender_id) {
-        sender = available.find((s) => s.id === prospect.sender_id);
-        if (!sender) {
-          const original = stmts.sender.get(prospect.sender_id);
-          if (!original || original.status !== 'active' || !senders.some((s) => s.id === original.id)) {
-            // Original mailbox gone: hand over to another sender in a new thread.
-            sender = available[0];
-          } else continue;
-        }
-      } else {
-        sender = available.sort((a, b) => senderCapacity(b, at) - senderCapacity(a, at))[0];
+      if (step.channel !== 'email') {
+        createTask({ campaign, prospect, step, senders });
+        continue;
       }
 
       // Never follow up on someone who already replied.
-      if (nextNumber > 1 && campaign.stop_on_reply && prospect.sender_id === sender.id) {
+      const threadOwner = prospect.sender_id ? stmts.sender.get(prospect.sender_id) : null;
+      if (stepNumber > 1 && campaign.stop_on_reply && threadOwner && threadOwner.status !== 'error' && prospect.thread_id) {
         try {
-          if (await scanReplies(prospect, campaign, sender)) continue;
+          if (await scanReplies(prospect, campaign, threadOwner)) continue;
         } catch (err) {
-          markSenderError(sender, err);
+          markSenderError(threadOwner, err);
           continue;
         }
       }
 
-      let decision = null;
-      if (prospect.pending_decision_json && prospect.postponed_step === nextNumber) {
-        decision = JSON.parse(prospect.pending_decision_json);
-      } else {
-        const ctx = {
-          campaign,
-          prospect,
-          stepNumber: nextNumber,
-          totalSteps,
-          engagement: engagementFor(db, prospect, campaign, at),
-          variants: step.variants.map((v) => ({
-            ...v,
-            preview: renderStep({ prospect, sender, variant: v, cta: null, step, threadSubject: prospect.first_subject }).body,
-          })),
-          ctas,
-        };
-        decision = await decideFn(ctx);
-        stmts.logDecision.run(prospect.id, nextNumber, decision.engine, decision.action, JSON.stringify(decision), nowIso(at));
-        if (decision.fitScore !== null && decision.fitScore !== undefined) setProspect(prospect.id, { fit_score: decision.fitScore });
+      let draft = stmts.openDraft.get(prospect.id, stepNumber);
+      if (!draft) {
+        // Sticky sender: follow-ups come from the mailbox that sent the first email.
+        const sender = senders.find((s) => s.id === prospect.sender_id) ||
+          [...senders].sort((a, b) => senderCapacity(b, at) - senderCapacity(a, at))[0];
+        if (!sender) continue;
+        draft = await createDraft({ campaign, prospect, step, sender, totalSteps: sequence.length, stats });
+      }
+      if (draft.status !== 'approved' || !sendingOpen) continue;
 
-        if (decision.action === 'stop') {
-          setProspect(prospect.id, { status: 'stopped', next_send_at: null, stop_reason: 'Jev: no encaja con la oferta/ICP' });
+      const sender = senders.find((s) => s.id === draft.sender_id);
+      if (!sender) {
+        // Mailbox paused/removed after drafting: discard the draft; a new one is generated next tick.
+        db.prepare("UPDATE drafts SET status = 'rejected', reviewed_at = ? WHERE id = ?").run(nowIso(at), draft.id);
+        continue;
+      }
+      if (usedSenders.has(sender.id) || !senderReady(sender, at) || senderCapacity(sender, at) <= 0) continue;
+
+      // Timing: if Jev prefers another part of the window, reschedule once for this step.
+      const decision = JSON.parse(draft.decision_json || '{}');
+      if (decision.slot && currentSlot && decision.slot !== currentSlot && prospect.postponed_step !== stepNumber) {
+        const target = ranges.find((r) => r.name === decision.slot);
+        const when = nextLocalSlot(campaign, at, target.from, target.to);
+        if (when > at) {
+          setProspect(prospect.id, { next_send_at: nowIso(when), postponed_step: stepNumber });
           continue;
-        }
-        // Timing: if Jev prefers another part of the window, reschedule once for this step.
-        if (decision.slot && currentSlot && decision.slot !== currentSlot) {
-          const target = ranges.find((r) => r.name === decision.slot);
-          const when = nextLocalSlot(campaign, at, target.from, target.to);
-          if (when > at) {
-            setProspect(prospect.id, {
-              next_send_at: nowIso(when),
-              pending_decision_json: JSON.stringify(decision),
-              postponed_step: nextNumber,
-            });
-            continue;
-          }
         }
       }
 
       try {
-        const ok = await sendOne({ campaign, prospect, step, sender, decision, totalSteps, sequence });
-        if (ok) {
-          usedSenders.add(sender.id);
-          sentCount += 1;
-        }
+        await sendDraft({ campaign, prospect, step, sender, draft, sequence });
+        usedSenders.add(sender.id);
+        sentCount += 1;
       } catch (err) {
         markSenderError(sender, err);
         setProspect(prospect.id, { last_error: String(err.message || err).slice(0, 500) });
@@ -409,19 +559,20 @@ export function createScheduler({
     running = true;
     try {
       await checkReplies();
+      const analyzed = await analyzeLeads();
       const usedSenders = new Set();
       let sent = 0;
       for (const campaign of stmts.activeCampaigns.all()) {
         sent += await processCampaign(campaign, usedSenders);
-        const remaining = db
-          .prepare("SELECT COUNT(*) AS n FROM prospects WHERE campaign_id = ? AND status = 'active'")
-          .get(campaign.id).n;
+        const open = db.prepare(
+          `SELECT COUNT(*) AS n FROM prospects p WHERE p.campaign_id = ? AND p.status = 'active'`,
+        ).get(campaign.id).n;
         const total = db.prepare('SELECT COUNT(*) AS n FROM prospects WHERE campaign_id = ?').get(campaign.id).n;
-        if (total > 0 && remaining === 0) {
+        if (total > 0 && open === 0) {
           db.prepare("UPDATE campaigns SET status = 'completed' WHERE id = ? AND status = 'active'").run(campaign.id);
         }
       }
-      return { sent };
+      return { sent, analyzed };
     } finally {
       running = false;
     }
@@ -431,6 +582,7 @@ export function createScheduler({
   return {
     tick,
     checkReplies,
+    analyzeLeads,
     start() {
       if (timer) return;
       timer = setInterval(() => {
@@ -444,4 +596,3 @@ export function createScheduler({
     },
   };
 }
-

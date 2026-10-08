@@ -17,6 +17,7 @@ const campaignBody = (senderIds) => ({
   send_days: [1, 2, 3, 4, 5],
   window_start: '08:00',
   window_end: '17:00',
+  approval_mode: 'none',
   sender_ids: senderIds,
   steps: [
     { delay_days: 0, same_thread: true, variants: [{ label: 'Dolor', angle: 'pain point', subject: 'idea para {{company}}', body: 'Hola {{first_name}},\n\nvi que {{company}} está en {{ciudad|tu ciudad}}. {{cta}}' }] },
@@ -70,7 +71,7 @@ test('full sequence: import, send, open, threaded follow-up, reply stops it', as
   assert.equal(created.body.campaign.steps.length, 3);
 
   const csv = 'first_name,last_name,email,company,ciudad\nAna,Pérez,ana@cliente.com,Cliente SA,Panamá\nLuis,Gómez,luis@otro.com,Otro SA,\nAna,Pérez,ana@cliente.com,Dup,\n';
-  const imported = await request(app).post(`/api/campaigns/${campaignId}/prospects/import`).set(auth).attach('file', Buffer.from(csv), 'p.csv');
+  const imported = await request(app).post(`/api/campaigns/${campaignId}/prospects/import`).set(auth).field('source', 'CRM propio').field('lawful_basis', 'interes_legitimo').attach('file', Buffer.from(csv), 'p.csv');
   assert.equal(imported.status, 200);
   assert.equal(imported.body.imported, 2);
   assert.equal(imported.body.duplicates, 1);
@@ -143,9 +144,10 @@ test('full sequence: import, send, open, threaded follow-up, reply stops it', as
   assert.match(fuText, /> Hola Ana/); // previous email quoted like a real reply
 
   const decisions = db.prepare('SELECT * FROM decisions WHERE prospect_id = ?').all(ana.id);
-  assert.equal(decisions.length, 2); // step 1 + step 2 (the deferred decision is reused, not recomputed)
-  assert.equal(decisions[1].engine, 'rules');
-  assert.match(JSON.parse(decisions[1].detail_json).detail.slot, /aperturas previas/);
+  // analysis + step-1 draft + step-2 draft (the rescheduled draft is reused, not recomputed)
+  assert.deepEqual(decisions.map((d) => d.action), ['analyze', 'draft', 'draft']);
+  assert.equal(decisions[2].engine, 'rules');
+  assert.match(JSON.parse(decisions[2].detail_json).detail.slot, /aperturas previas/);
 
   const stats = await request(app).get(`/api/campaigns/${campaignId}/stats`).set(auth);
   assert.equal(stats.body.totals.sent, 3);
@@ -165,7 +167,7 @@ test('auto-replies keep the sequence running; unsubscribe stops it and suppresse
   const senderId = insertSender(db, userId);
   const { body } = await request(app).post('/api/campaigns').set(auth).send(campaignBody([senderId]));
   await request(app).post(`/api/campaigns/${body.campaign.id}/prospects/import`).set(auth)
-    .attach('file', Buffer.from('email,first_name,company\nana@cliente.com,Ana,Cliente SA\n'), 'p.csv');
+    .field('source', 'CRM propio').field('lawful_basis', 'interes_legitimo').attach('file', Buffer.from('email,first_name,company\nana@cliente.com,Ana,Cliente SA\n'), 'p.csv');
   await request(app).post(`/api/campaigns/${body.campaign.id}/status`).set(auth).send({ status: 'active' });
   await scheduler.tick();
   const ana = db.prepare('SELECT * FROM prospects').get();
@@ -183,18 +185,20 @@ test('auto-replies keep the sequence running; unsubscribe stops it and suppresse
 
   // Re-importing a suppressed address is skipped.
   const again = await request(app).post(`/api/campaigns/${body.campaign.id}/prospects/import`).set(auth)
-    .attach('file', Buffer.from('email\nana@cliente.com\n'), 'p.csv');
+    .field('source', 'CRM propio').field('lawful_basis', 'interes_legitimo').attach('file', Buffer.from('email\nana@cliente.com\n'), 'p.csv');
   assert.equal(again.body.suppressed, 1);
 });
 
 test('Jev decisions pick variants/CTAs, stop non-fits and move sends to the preferred slot', async () => {
   const calls = [];
+  const analyzeFn = async ({ prospect }) => ({
+    engine: 'jev', segmentId: null, fitScore: 0.75, exclude: prospect.email.startsWith('competidor'), detail: {},
+  });
   const decideFn = async (ctx) => {
     calls.push(ctx);
-    if (ctx.prospect.email.startsWith('competidor')) return { engine: 'jev', action: 'stop', detail: {} };
-    return { engine: 'jev', action: 'send', variantId: ctx.variants[1].id, ctaId: ctx.ctas[1].id, slot: 'late', fitScore: 0.75, detail: {} };
+    return { engine: 'jev', action: 'send', variantId: ctx.variants[1].id, ctaId: ctx.ctas[1].id, slot: 'late', detail: {} };
   };
-  const { app, db, gmail, clock, scheduler } = setup({ decideFn });
+  const { app, db, gmail, clock, scheduler } = setup({ decideFn, analyzeFn });
   const { token, userId } = await register(app);
   const auth = { Authorization: `Bearer ${token}` };
   const senderId = insertSender(db, userId);
@@ -202,7 +206,7 @@ test('Jev decisions pick variants/CTAs, stop non-fits and move sends to the pref
   data.steps[0].variants.push({ label: 'Prueba social', angle: 'case study', subject: 'cómo {{company}} podría', body: 'Hola {{first_name}}, ayudamos a una empresa como {{company}}. {{cta}}' });
   const { body } = await request(app).post('/api/campaigns').set(auth).send(data);
   await request(app).post(`/api/campaigns/${body.campaign.id}/prospects/import`).set(auth)
-    .attach('file', Buffer.from('email,first_name,company\ncompetidor@rival.com,Rival,Rival\nana@cliente.com,Ana,Cliente SA\n'), 'p.csv');
+    .field('source', 'CRM propio').field('lawful_basis', 'interes_legitimo').attach('file', Buffer.from('email,first_name,company\ncompetidor@rival.com,Rival,Rival\nana@cliente.com,Ana,Cliente SA\n'), 'p.csv');
   await request(app).post(`/api/campaigns/${body.campaign.id}/status`).set(auth).send({ status: 'active' });
 
   await scheduler.tick(); // 10:00 local = "early" slot → both decided, Ana rescheduled to 14:00
@@ -216,7 +220,7 @@ test('Jev decisions pick variants/CTAs, stop non-fits and move sends to the pref
 
   clock.now = new Date('2026-10-07T19:05:00Z');
   await scheduler.tick();
-  assert.equal(calls.length, 2); // pending decision reused, Jev not asked again
+  assert.equal(calls.length, 1); // the drafted decision is reused, Jev is not asked again
   assert.equal(gmail.state.sent.length, 1);
   assert.match(gmail.state.sent[0].mime, /Subject: =\?UTF-8\?B\?/); // "cómo …" variant chosen
   assert.match(decodeBodies(gmail.state.sent[0].mime)[0], /ayudamos a una empresa como Cliente SA\. ¿Tienes 15 minutos el jueves\?/);

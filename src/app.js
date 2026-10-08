@@ -4,19 +4,22 @@ import express from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
 import { config, googleConfigured, jevConfigured } from './config.js';
-import { lintEmail } from './lib/lint.js';
+import { lintTemplate } from './lib/quality.js';
+import { LAWFUL_BASES } from './lib/validate.js';
 import { requireAuth } from './middleware/auth.js';
 import { authRoutes } from './routes/auth.js';
-import { campaignRoutes, prospectRoutes } from './routes/campaigns.js';
+import { campaignRoutes } from './routes/campaigns.js';
 import { senderRoutes } from './routes/senders.js';
 import { trackingRoutes } from './routes/tracking.js';
+import { workRoutes } from './routes/work.js';
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 /**
- * @param deps { db, scheduler?, gmailFor?, decideFn?, now? } — injectable for tests.
+ * @param deps { db, scheduler?, gmailFor?, decideFn?, analyzeFn?, mx?, now? } — injectable for tests.
  */
-export function createApp({ db, scheduler, gmailFor, decideFn, now } = {}) {
+export function createApp({ db, scheduler, gmailFor, decideFn, analyzeFn, mx, now } = {}) {
+  const inject = (deps) => Object.fromEntries(Object.entries(deps).filter(([, v]) => v !== undefined));
   const app = express();
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -46,8 +49,8 @@ export function createApp({ db, scheduler, gmailFor, decideFn, now } = {}) {
   app.use('/api', express.json({ limit: '1mb' }));
   app.use('/api/auth', authRoutes(db));
   app.use('/api/senders', senderRoutes(db, gmailFor ? { gmailFor } : {}));
-  app.use('/api/campaigns', campaignRoutes(db, { ...(decideFn ? { decideFn } : {}), ...(now ? { now } : {}) }));
-  app.use('/api/prospects', prospectRoutes(db));
+  app.use('/api/campaigns', campaignRoutes(db, inject({ decideFn, analyzeFn, now, mx })));
+  app.use('/api', workRoutes(db, inject({ now })));
 
   app.get('/api/meta', (req, res) => {
     res.json({
@@ -55,14 +58,21 @@ export function createApp({ db, scheduler, gmailFor, decideFn, now } = {}) {
       jev_configured: jevConfigured(),
       jev_model: config.typesafe.model,
       max_steps: config.sequence.maxSteps,
+      max_total_steps: 7,
       base_url: config.baseUrl,
       allow_registration: config.allowRegistration,
+      lawful_bases: LAWFUL_BASES,
     });
   });
 
   app.post('/api/lint', requireAuth(db), (req, res) => {
-    const input = z.object({ subject: z.string().default(''), body: z.string().default(''), step_number: z.number().int().min(1).default(1) }).parse(req.body);
-    res.json(lintEmail({ subject: input.subject, body: input.body, stepNumber: input.step_number }));
+    const input = z.object({
+      subject: z.string().default(''),
+      body: z.string().default(''),
+      step_number: z.number().int().min(1).default(1),
+      thread_reply: z.boolean().default(false),
+    }).parse(req.body);
+    res.json(lintTemplate({ subject: input.subject, body: input.body, stepNumber: input.step_number, threadReply: input.thread_reply }));
   });
 
   // Run the scheduler immediately (useful to test a campaign without waiting for the next tick).
@@ -80,7 +90,7 @@ export function createApp({ db, scheduler, gmailFor, decideFn, now } = {}) {
       return res.status(400).json({ error: err.issues.map((i) => `${i.path.join('.') || 'datos'}: ${i.message}`).join('; ') });
     }
     if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'JSON inválido' });
-    if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Archivo demasiado grande (máx. 10 MB)' });
+    if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Archivo demasiado grande (máx. 15 MB)' });
     const status = err.response?.status && err.response.status < 500 ? 502 : err.status || 500;
     if (status >= 500 && !config.isTest) console.error(err);
     return res.status(status).json({ error: status === 500 ? 'Error interno' : err.message });

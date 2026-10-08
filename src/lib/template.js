@@ -33,7 +33,7 @@ export function prospectVariables(prospect, extra = {}) {
     custom = {};
   }
   const vars = { ...custom };
-  for (const key of ['email', 'first_name', 'last_name', 'company', 'title']) {
+  for (const key of ['email', 'first_name', 'last_name', 'company', 'title', 'industry', 'country', 'phone', 'linkedin_url']) {
     if (prospect[key]) vars[key] = prospect[key];
   }
   vars.full_name = [vars.first_name, vars.last_name].filter(Boolean).join(' ');
@@ -129,4 +129,15 @@ export function buildEmailBody({ body, signatureHtml, trackingPixelUrl, unsubscr
   }
   html += '</div>';
   return { text, html };
+}
+
+/**
+ * True when every field referenced by `template` has a real value for this prospect.
+ * Used to only offer personalization hooks that are verifiable (no fallbacks, no blanks).
+ */
+export function allFieldsPresent(template, vars) {
+  return [...String(template ?? '').matchAll(FIELD_RE)].every((m) => {
+    const value = vars[normalizeKey(m[1])];
+    return value !== undefined && value !== null && String(value).trim() !== '';
+  });
 }

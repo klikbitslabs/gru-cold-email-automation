@@ -162,7 +162,102 @@ CREATE TABLE IF NOT EXISTS decisions (
   detail_json TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+
+-- Commercial segments (e.g. "Retail - Gerente comercial"). Jev assigns each prospect to one.
+CREATE TABLE IF NOT EXISTS segments (
+  id INTEGER PRIMARY KEY,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT ''
+);
+
+-- Reusable copy blocks chosen per prospect: personalization hooks ({{gancho}}) and
+-- problem hypotheses ({{problema}}). segment_id NULL = available to every segment.
+CREATE TABLE IF NOT EXISTS snippets (
+  id INTEGER PRIMARY KEY,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('hook','problem')),
+  segment_id INTEGER REFERENCES segments(id) ON DELETE SET NULL,
+  label TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL
+);
+
+-- Every email is drafted first (generation + quality control), then approved, then sent.
+CREATE TABLE IF NOT EXISTS drafts (
+  id INTEGER PRIMARY KEY,
+  prospect_id INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  step_number INTEGER NOT NULL,
+  sender_id INTEGER REFERENCES senders(id) ON DELETE SET NULL,
+  variant_id INTEGER REFERENCES variants(id) ON DELETE SET NULL,
+  cta_id INTEGER REFERENCES ctas(id) ON DELETE SET NULL,
+  hook_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL,
+  problem_id INTEGER REFERENCES snippets(id) ON DELETE SET NULL,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  same_thread INTEGER NOT NULL DEFAULT 0,
+  quality_json TEXT NOT NULL DEFAULT '{}',
+  decision_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','sent')),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  reviewed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_drafts_prospect ON drafts (prospect_id, step_number, status);
+
+-- Non-email steps (cold call, LinkedIn) become tasks for a person to complete.
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY,
+  prospect_id INTEGER NOT NULL REFERENCES prospects(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  step_number INTEGER NOT NULL,
+  channel TEXT NOT NULL CHECK (channel IN ('call','linkedin')),
+  instructions TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done','skipped')),
+  outcome TEXT,
+  note TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  completed_at TEXT
+);
 `;
+
+// Columns added after the first release. ALTER TABLE keeps existing databases (e.g. on a
+// Railway volume) working without manual migrations.
+const ADDED_COLUMNS = {
+  campaigns: {
+    approval_mode: "TEXT NOT NULL DEFAULT 'first'",
+  },
+  steps: {
+    channel: "TEXT NOT NULL DEFAULT 'email'",
+  },
+  variants: {
+    segment_id: 'INTEGER REFERENCES segments(id) ON DELETE SET NULL',
+  },
+  prospects: {
+    industry: "TEXT NOT NULL DEFAULT ''",
+    country: "TEXT NOT NULL DEFAULT ''",
+    phone: "TEXT NOT NULL DEFAULT ''",
+    linkedin_url: "TEXT NOT NULL DEFAULT ''",
+    source: "TEXT NOT NULL DEFAULT ''",
+    lawful_basis: "TEXT NOT NULL DEFAULT ''",
+    validation_status: "TEXT NOT NULL DEFAULT 'valid'",
+    validation_notes: "TEXT NOT NULL DEFAULT ''",
+    segment_id: 'INTEGER REFERENCES segments(id) ON DELETE SET NULL',
+    intel_json: 'TEXT',
+    intel_at: 'TEXT',
+    outcome: 'TEXT',
+    outcome_at: 'TEXT',
+  },
+};
+
+function migrate(db) {
+  for (const [table, columns] of Object.entries(ADDED_COLUMNS)) {
+    const existing = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
+    for (const [name, definition] of Object.entries(columns)) {
+      if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+    }
+  }
+}
 
 export function openDatabase(file = config.databasePath) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
@@ -170,6 +265,7 @@ export function openDatabase(file = config.databasePath) {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 

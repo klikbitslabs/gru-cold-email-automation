@@ -1,5 +1,7 @@
 # Buenas prácticas de cold email (investigación)
 
+> **Reglas de la casa.** Las reglas de asunto y cuerpo definidas por el equipo (asunto de 3–7 palabras; cuerpo de 45–85 palabras con advertencia desde 110; estructura de 3 párrafos contexto → problema → pregunta; una sola acción; sin enlaces ni adjuntos en el primer correo; firma real; español natural) son las que aplica `src/lib/quality.js` y prevalecen sobre las cifras de la investigación de abajo cuando difieren. Ver el README para la tabla de severidades.
+
 Resumen de la investigación usada para diseñar la herramienta. Cada práctica indica **dónde se aplica** en el código.
 
 > **Nota sobre las fuentes.** Las URLs pedidas (ycombinator.com, news.ycombinator.com, clay.com, instantly.ai, typesafe.ai) estaban bloqueadas por el proxy de red del entorno donde se construyó esto. El contenido se obtuvo con búsqueda web (resúmenes de esas mismas páginas y de terceros que las citan). Para Jev se usó el **SDK oficial** (`typesafe-ai/typesafe-sdk-js`) y la skill oficial (`typesafe-ai/skills`), clonados desde GitHub: el contrato de la API está verificado contra el código fuente del SDK, no contra resúmenes. Las cifras que vienen de proveedores (Clay, Instantly, etc.) son su propio playbook, no estudios independientes.
@@ -8,14 +10,14 @@ Resumen de la investigación usada para diseñar la herramienta. Cada práctica 
 
 | Práctica | Fuente | Dónde se aplica |
 |---|---|---|
-| Corto: se lee en ≤ 60 s. Primer correo 50–125 palabras; Clay recomienda < 75. Follow-ups más cortos (30–90). | YC / Michael Seibel; Clay; Woodpecker, Lemlist | `src/lib/lint.js` (`too_long`) |
-| Asunto corto (2–6 palabras), sin MAYÚSCULAS, sin "!" ni "Re:"/"Fwd:" falsos. | Lemlist, Folderly, Hyperise | `lint.js` (`long_subject`, `shouty_subject`, `fake_reply`) |
-| Personalización real: abrir con algo específico del prospecto (trigger, observación, hipótesis), no con quién eres. | Clay, Lemlist | `lint.js` (`no_personalization`, `self_focused`); campos CSV → `{{campo}}` |
+| Corto: se lee en ≤ 60 s. Primer correo 50–125 palabras; Clay recomienda < 75. Follow-ups más cortos (30–90). | YC / Michael Seibel; Clay; Woodpecker, Lemlist | `src/lib/quality.js` (`too_long`, `above_target`, `too_short`) |
+| Asunto corto (2–6 palabras), sin MAYÚSCULAS, sin "!" ni "Re:"/"Fwd:" falsos. | Lemlist, Folderly, Hyperise | `quality.js` (`subject_length`, `subject_caps`, `subject_exclamation`, `fake_reply`) |
+| Personalización real: abrir con algo específico del prospecto (trigger, observación, hipótesis), no con quién eres. | Clay, Lemlist | `quality.js` (`personalization`); ganchos verificables `{{gancho}}`; campos del archivo → `{{campo}}` |
 | Estructura: contexto específico → evidencia del problema → costo de no actuar → prueba social con resultado medible → CTA de baja fricción. | Clay (guía B2B copywriting) | Plantillas por defecto del editor (`public/app.js` → `defaultCampaign`) |
-| Una sola petición, pequeña. No pedir reunión de 30 min en el primer correo; pedir interés, enviar info o consejo. | YC (Seibel: "no pidas reunión de entrada"), Clay | `lint.js` (`big_ask`, `many_asks`, `no_cta`); librería de CTAs que Jev escala según interacción |
+| Una sola petición, pequeña. No pedir reunión de 30 min en el primer correo; pedir interés, enviar info o consejo. | YC (Seibel: "no pidas reunión de entrada"), Clay | `quality.js` (`many_ctas`, `no_cta`); biblioteca de CTAs que Jev escala según interacción |
 | Investor emails: qué haces, la señal más fuerte (tracción, equipo), una petición concreta. Sin historia de origen ni jerga. | YC (Seibel, "3 frases") | Guía en la UI |
 | Escribir como colega, no como marketer. Texto plano, sin HTML pesado. | Clay, Instantly | Cuerpo en texto plano → HTML mínimo (`src/lib/template.js`) |
-| Evitar palabras spam ("gratis", "garantizado", "urgente"…) y > 1 link; sin imágenes/adjuntos al inicio. | Lemlist, Instantly, Clay | `lint.js` (`spam_words`, `links`, `images`) |
+| Evitar palabras spam ("gratis", "garantizado", "urgente"…) y > 1 link; sin imágenes/adjuntos al inicio. | Lemlist, Instantly, Clay | `quality.js` (`hype`, `subject_hype`, `links_first_email`, `links`) |
 
 ## 2. Secuencia y follow-ups
 

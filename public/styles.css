@@ -58,6 +58,7 @@ main { max-width: 1120px; margin: 0 auto; padding: 24px 16px 64px; }
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .between { justify-content: space-between; }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
 .grid4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
 .stack > * + * { margin-top: 12px; }
 
@@ -128,3 +129,16 @@ pre.json { background: var(--bg); padding: 10px; border-radius: 8px; overflow: a
   .topbar-right { margin-left: 0; }
   main { padding: 16px 12px 48px; }
 }
+
+.step-task { border-left-color: var(--warn); }
+.lint li.sev-error { color: var(--bad); }
+.lint li.sev-warning { color: var(--warn); }
+.lint li.sev-info { color: var(--muted); }
+.lint { list-style: none; padding-left: 0; }
+details.notice summary { cursor: pointer; font-weight: 600; }
+.notice ul { margin: 6px 0 0; padding-left: 18px; }
+.funnel-row { display: grid; grid-template-columns: 120px 1fr 48px; gap: 10px; align-items: center; margin: 6px 0; }
+.funnel-row b { text-align: right; }
+.funnel-bar { background: var(--bg); border-radius: 6px; height: 14px; overflow: hidden; }
+.funnel-bar div { background: var(--accent); height: 100%; border-radius: 6px; }
+ol.guide li { margin-bottom: 6px; }

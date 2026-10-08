@@ -83,6 +83,7 @@ const routes = [
   [/^#\/campaigns$/, viewCampaigns],
   [/^#\/campaigns\/(\d+)(?:\/(\w+))?$/, viewCampaign],
   [/^#\/senders/, viewSenders],
+  [/^#\/tasks$/, viewTasks],
   [/^#\/guide$/, viewGuide],
 ];
 
@@ -157,43 +158,65 @@ function viewRegister() { authForm({ title: 'Crea tu cuenta', submit: 'Crear cue
 // ---------------------------------------------------------------------------
 // Campaign list
 // ---------------------------------------------------------------------------
+const CHANNEL_LABEL = { email: 'Correo', call: 'Llamada (cold call)', linkedin: 'LinkedIn' };
+const OUTCOME_LABEL = { interested: 'Interesado', meeting: 'Reunión', opportunity: 'Oportunidad', won: 'Cierre ganado', lost: 'Perdido' };
+const VALIDATION_LABEL = { valid: 'Válido', risky: 'Riesgoso', invalid: 'Inválido' };
+const APPROVAL_LABEL = {
+  first: 'Aprobar el primer correo de cada prospecto (y cualquiera con advertencias)',
+  all: 'Aprobar todos los correos',
+  issues: 'Aprobar solo los que tengan advertencias de calidad',
+  none: 'Envío automático (solo se detienen los que tengan errores)',
+};
+const ENGINE_LABEL = { jev: 'Jev', rules: 'reglas' };
+const engineLabel = (e) => ENGINE_LABEL[e] || e || '—';
+const validationBadge = (v) => `<span class="badge ${v === 'valid' ? 'ok' : v === 'risky' ? 'warn' : 'bad'}">${esc(VALIDATION_LABEL[v] || v)}</span>`;
+
 async function viewCampaigns() {
   const { campaigns } = await api('/campaigns');
   app.innerHTML = `
-    <div class="row between"><div><h1>Campañas</h1><p class="muted">Secuencias de hasta ${meta.max_steps} envíos por prospecto.</p></div>
+    <div class="row between"><div><h1>Campañas</h1><p class="muted">Importación → validación → inteligencia comercial → generación y aprobación → orquestación → resultados.</p></div>
       <button class="btn" id="new-campaign">+ Nueva campaña</button></div>
     ${campaigns.length ? `<div class="card table-wrap"><table>
-      <thead><tr><th>Campaña</th><th>Estado</th><th>Prospectos</th><th>Enviados</th><th>Apertura</th><th>Respuesta</th><th>Interesados</th></tr></thead>
+      <thead><tr><th>Campaña</th><th>Estado</th><th>Prospectos</th><th>Por aprobar</th><th>Tareas</th><th>Respuesta</th><th>Reuniones</th><th>Cierres</th></tr></thead>
       <tbody>${campaigns.map((c) => `
         <tr class="clickable" data-id="${c.id}"><td><b>${esc(c.name)}</b></td><td>${badge(c.status)}</td>
-        <td>${c.stats.prospects} <span class="muted small">(${c.stats.active} activos)</span></td><td>${c.stats.sent}</td>
-        <td>${c.stats.open_rate}%</td><td>${c.stats.reply_rate}%</td><td>${c.stats.interested}</td></tr>`).join('')}
-      </tbody></table></div>` : '<div class="card empty"><p>Aún no tienes campañas.</p><p>1) Conecta un sender de Google Workspace · 2) Crea la secuencia · 3) Importa tu CSV · 4) Activa.</p></div>'}`;
+        <td>${c.stats.prospects} <span class="muted small">(${c.stats.active} activos)</span></td>
+        <td>${c.stats.pending_approval ? `<span class="badge warn">${c.stats.pending_approval}</span>` : '0'}</td><td>${c.stats.open_tasks}</td>
+        <td>${c.stats.reply_rate}%</td><td>${c.stats.meetings}</td><td>${c.stats.won}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="card empty"><p>Aún no tienes campañas.</p><p>1) Conecta un sender de Google Workspace · 2) Crea la campaña · 3) Importa tu base · 4) Revisa y aprueba · 5) Activa.</p></div>'}`;
   $$('tr[data-id]').forEach((tr) => tr.addEventListener('click', () => { location.hash = `#/campaigns/${tr.dataset.id}`; }));
-  $('#new-campaign').addEventListener('click', async (e) => {
-    await guard(e.currentTarget, async () => {
-      const { campaign } = await api('/campaigns', { method: 'POST', body: defaultCampaign() });
-      location.hash = `#/campaigns/${campaign.id}`;
-    });
-  });
+  $('#new-campaign').addEventListener('click', (e) => guard(e.currentTarget, async () => {
+    const { campaign } = await api('/campaigns', { method: 'POST', body: defaultCampaign() });
+    location.hash = `#/campaigns/${campaign.id}`;
+  }));
 }
 
 function defaultCampaign() {
+  const body = 'Hola {{first_name}},\n\n{{gancho}}\n\n{{problema}}\n\n{{cta}}';
   return {
     name: `Campaña ${new Date().toLocaleDateString('es')}`,
-    offer: '',
-    icp: '',
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Panama',
+    approval_mode: 'first',
+    segments: [],
     steps: [
-      { delay_days: 0, same_thread: true, variants: [{ label: 'A · Dolor', angle: 'Abre con un problema concreto del rol del prospecto y el costo de no resolverlo', subject: 'idea para {{company}}', body: 'Hola {{first_name}},\n\nvi que {{company}} está creciendo su equipo comercial. La mayoría de equipos así pierde horas investigando prospectos a mano.\n\nAyudamos a equipos similares a reducir ese tiempo a la mitad.\n\n{{cta}}' }] },
-      { delay_days: 3, same_thread: true, variants: [{ label: 'A · Prueba social', angle: 'Aporta un resultado medible de un cliente parecido', subject: '', body: '{{first_name}}, por contexto: un equipo parecido a {{company}} pasó de 5 a 12 reuniones por semana en un mes.\n\n{{cta}}' }] },
-      { delay_days: 4, same_thread: true, variants: [{ label: 'A · Nuevo ángulo', angle: 'Otro dolor distinto, muy corto', subject: '', body: '{{first_name}}, otra forma de verlo: ¿cuánto tiempo dedica tu equipo a hacer seguimiento manual?\n\n{{cta}}' }] },
-      { delay_days: 7, same_thread: true, variants: [{ label: 'A · Cierre', angle: 'Breakup: cierre respetuoso y fácil de responder', subject: '', body: '{{first_name}}, no quiero llenar tu bandeja. ¿Lo dejo aquí o lo retomamos más adelante?' }] },
-    ].slice(0, meta.max_steps || 4),
+      { channel: 'email', variants: [
+        { label: 'A · Cargo', angle: 'Asunto centrado en el cargo de la persona', subject: 'pregunta sobre tu rol en {{company}}', body },
+        { label: 'B · Empresa', angle: 'Asunto centrado en la empresa', subject: 'idea para el equipo de {{company}}', body },
+      ] },
+      { channel: 'email', delay_days: 3, same_thread: true, variants: [{ label: 'Prueba social', angle: 'Resultado medible de un cliente parecido', subject: '', body: '{{first_name}}, por contexto: un equipo parecido al de {{company}} redujo a la mitad el tiempo de prospección en un mes.\n\n{{cta}}' }] },
+      { channel: 'call', delay_days: 2, variants: [{ label: 'Guion de llamada', body: 'Llamar a {{first_name}} ({{title}} en {{company}}). Referenciar el correo enviado. Objetivo: validar el problema y proponer 15 minutos.' }] },
+      { channel: 'email', delay_days: 4, same_thread: true, variants: [{ label: 'Cierre', angle: 'Cierre respetuoso y fácil de responder', subject: '', body: '{{first_name}}, no quiero llenar tu bandeja. Si no es prioridad ahora, lo dejo aquí.\n\n¿Lo retomamos más adelante?' }] },
+    ],
+    hooks: [
+      { label: 'Responsabilidad', description: 'Contexto real de su cargo y responsabilidad', text: 'Como {{title}} en {{company}}, imagino que buena parte de tu semana se va en coordinar al equipo y sus metas.' },
+    ],
+    problems: [
+      { label: 'Prospección manual', description: 'El equipo pierde tiempo investigando leads a mano', text: 'En equipos parecidos vemos que se pierden varias horas por semana investigando prospectos a mano antes de cada contacto.' },
+    ],
     ctas: [
-      { label: 'Interés', description: 'Baja fricción: solo confirmar interés. Para prospectos sin interacción.', text: '¿Te interesa que te envíe más detalles?' },
-      { label: 'Recurso', description: 'Ofrecer un recurso útil sin pedir reunión.', text: '¿Te comparto un video de 2 minutos con cómo lo hacemos?' },
-      { label: 'Llamada', description: 'Pedido directo de reunión corta. Solo para prospectos que abrieron varias veces o encajan muy bien.', text: '¿Tienes 15 minutos esta semana para verlo?' },
+      { label: 'Interés', description: 'Baja fricción: solo confirmar interés. Para prospectos sin interacción.', text: '¿Tiene sentido que te comparta cómo lo resolvieron?' },
+      { label: 'Recurso', description: 'Ofrecer un recurso útil sin pedir reunión.', text: '¿Te envío un resumen de una página?' },
+      { label: 'Llamada', description: 'Pedido directo de reunión corta. Solo para prospectos que abrieron varias veces o encajan muy bien.', text: '¿Te parece si lo vemos 15 minutos esta semana?' },
     ],
   };
 }
@@ -201,21 +224,25 @@ function defaultCampaign() {
 // ---------------------------------------------------------------------------
 // Campaign detail (tabs)
 // ---------------------------------------------------------------------------
+const TABS = [['sequence', 'Secuencia'], ['library', 'Personalización'], ['settings', 'Configuración'], ['prospects', 'Prospectos'], ['approval', 'Aprobación'], ['results', 'Resultados']];
+
 async function viewCampaign(id, tab = 'sequence') {
-  const [{ campaign }, { senders }] = await Promise.all([api(`/campaigns/${id}`), api('/senders')]);
+  const [{ campaign, readiness }, { senders }] = await Promise.all([api(`/campaigns/${id}`), api('/senders')]);
   const canRun = campaign.status !== 'active';
+  const s = campaign.stats;
   app.innerHTML = `
     <div class="row between">
       <div><a href="#/campaigns" class="small">← Campañas</a><h1>${esc(campaign.name)} ${badge(campaign.status)}</h1>
-        <p class="muted small">${campaign.stats.prospects} prospectos · ${campaign.stats.sent} enviados · ${campaign.stats.open_rate}% apertura · ${campaign.stats.reply_rate}% respuesta</p></div>
+        <p class="muted small">${s.prospects} prospectos · ${s.sent} correos · ${s.reply_rate}% respuesta · ${s.meetings} reuniones · ${s.won} cierres</p></div>
       <div class="row">
         <button class="btn ${canRun ? 'ok' : 'ghost'}" id="toggle-status">${canRun ? '▶ Activar' : '⏸ Pausar'}</button>
-        <button class="btn ghost" id="run-now" title="Ejecuta el scheduler ahora (respeta ventanas y límites)">Procesar ahora</button>
+        <button class="btn ghost" id="run-now" title="Ejecuta ahora: análisis, borradores y envíos (respeta ventanas y límites)">Procesar ahora</button>
         <button class="btn danger small" id="delete-campaign">Eliminar</button>
       </div>
     </div>
-    <div class="tabs">${[['sequence', 'Secuencia'], ['settings', 'Configuración'], ['prospects', 'Prospectos'], ['stats', 'Estadísticas']]
-      .map(([k, l]) => `<button data-tab="${k}" class="${tab === k ? 'active' : ''}">${l}</button>`).join('')}</div>
+    ${readiness.problems.length ? `<div class="notice"><b>Antes de activar:</b><ul>${readiness.problems.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></div>` : ''}
+    ${readiness.recommendations.length ? `<details class="notice info"><summary>${readiness.recommendations.length} recomendación(es)</summary><ul>${readiness.recommendations.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>` : ''}
+    <div class="tabs">${TABS.map(([k, l]) => `<button data-tab="${k}" class="${tab === k ? 'active' : ''}">${l}${k === 'approval' && s.pending_approval ? ` <span class="badge warn">${s.pending_approval}</span>` : ''}</button>`).join('')}</div>
     <div id="tab"></div>`;
   $$('[data-tab]').forEach((b) => b.addEventListener('click', () => { location.hash = `#/campaigns/${id}/${b.dataset.tab}`; }));
   $('#toggle-status').addEventListener('click', (e) => guard(e.currentTarget, async () => {
@@ -225,30 +252,39 @@ async function viewCampaign(id, tab = 'sequence') {
   }));
   $('#run-now').addEventListener('click', (e) => guard(e.currentTarget, async () => {
     const r = await api('/scheduler/run', { method: 'POST' });
-    toast(r.skipped ? 'El scheduler ya está corriendo' : `Procesado: ${r.sent} correo(s) enviado(s)`);
+    toast(r.skipped ? 'El proceso ya está corriendo' : `Analizados: ${r.analyzed} · enviados: ${r.sent}`);
     router();
   }));
   $('#delete-campaign').addEventListener('click', (e) => guard(e.currentTarget, async () => {
-    if (!confirm('¿Eliminar la campaña con sus prospectos y estadísticas?')) return;
+    if (!confirm('¿Eliminar la campaña con sus prospectos y resultados?')) return;
     await api(`/campaigns/${id}`, { method: 'DELETE' });
     location.hash = '#/campaigns';
   }));
 
   const el = $('#tab');
+  if (tab === 'library') return renderLibrary(el, campaign);
   if (tab === 'settings') return renderSettings(el, campaign, senders);
   if (tab === 'prospects') return renderProspects(el, campaign);
-  if (tab === 'stats') return renderStats(el, campaign);
+  if (tab === 'approval') return renderApproval(el, campaign);
+  if (tab === 'results') return renderResults(el, campaign);
   return renderSequence(el, campaign);
 }
 
 function campaignPayload(c) {
+  const snippet = ({ id, label, description, segment, text }) => ({ id, label, description, segment: segment || '', text });
   return {
     name: c.name, offer: c.offer, icp: c.icp, timezone: c.timezone, send_days: c.send_days,
     window_start: c.window_start, window_end: c.window_end, track_opens: c.track_opens,
     include_unsubscribe: c.include_unsubscribe, jev_enabled: c.jev_enabled, stop_on_reply: c.stop_on_reply,
-    sender_ids: c.sender_ids,
-    steps: c.steps.map((s) => ({ delay_days: Number(s.delay_days) || 0, same_thread: s.same_thread, variants: s.variants })),
-    ctas: c.ctas,
+    approval_mode: c.approval_mode, sender_ids: c.sender_ids,
+    segments: c.segments.map(({ id, name, description }) => ({ id, name, description })),
+    steps: c.steps.map((s) => ({
+      channel: s.channel, delay_days: Number(s.delay_days) || 0, same_thread: s.same_thread,
+      variants: s.variants.map(({ id, label, angle, segment, subject, body }) => ({ id, label, angle: angle || '', segment: segment || '', subject: subject || '', body })),
+    })),
+    hooks: c.hooks.map(snippet),
+    problems: c.problems.map(snippet),
+    ctas: c.ctas.map(({ id, label, description, text }) => ({ id, label, description, text })),
   };
 }
 
@@ -260,83 +296,86 @@ async function saveCampaign(c, button) {
   });
 }
 
-// --- Sequence editor -------------------------------------------------------
+const segmentOptions = (segments, current) => `<option value="">Todos los segmentos</option>${segments.map((sg) => `<option ${sg.name === current ? 'selected' : ''}>${esc(sg.name)}</option>`).join('')}`;
+
+function issuesHtml(issues, okText) {
+  if (!issues.length) return `<ul class="lint ok"><li>✓ ${esc(okText)}</li></ul>`;
+  const icon = { error: '⛔', warning: '⚠️', info: 'ℹ️' };
+  return `<ul class="lint">${issues.map((i) => `<li class="sev-${i.severity}">${icon[i.severity] || ''} ${esc(i.message)}</li>`).join('')}</ul>`;
+}
+
+// --- Sequence editor ---------------------------------------------------------
 async function renderSequence(el, campaign) {
   const c = structuredClone(campaign);
   let lastField = null;
   const fields = await api(`/campaigns/${c.id}/prospects?page=1`).then((r) => r.merge_fields).catch(() => []);
+  const emailCount = () => c.steps.filter((s) => s.channel === 'email').length;
 
   function draw() {
     el.innerHTML = `
-      <div class="card"><div class="row between"><div>
+      <div class="card">
         <h2>Campos de personalización</h2>
-        <p class="muted small">Haz clic para insertar en el último campo editado. Usa <code>{{campo|alternativa}}</code> para cuando el dato falte en el CSV; si falta sin alternativa, ese prospecto se detiene en vez de enviar un correo roto.</p></div></div>
+        <p class="muted small">Estructura recomendada del primer correo: <code>{{gancho}}</code> (contexto real de la persona) → <code>{{problema}}</code> (hipótesis) → <code>{{cta}}</code> (una sola acción). Jev elige el gancho, el problema y el CTA de la pestaña <b>Personalización</b>; un gancho solo se usa si todos sus datos existen para ese prospecto. Usa <code>{{campo|alternativa}}</code> para datos opcionales.</p>
         <div class="chips">${[...new Set(fields)].map((f) => `<button class="chip" data-field="${esc(f)}">{{${esc(f)}}}</button>`).join('')}</div>
       </div>
       ${c.steps.map((s, i) => stepHtml(s, i)).join('')}
       <div class="row">
-        ${c.steps.length < meta.max_steps ? '<button class="btn ghost" id="add-step">+ Agregar follow-up</button>' : `<span class="muted small">Máximo ${meta.max_steps} envíos por secuencia (buena práctica: ~4 toques).</span>`}
-      </div>
-      <div class="card" style="margin-top:16px">
-        <h2>Llamados a la acción ({{cta}})</h2>
-        <p class="muted small">Jev elige el CTA según la interacción del prospecto: baja fricción para quien no ha abierto, más directo para quien abrió varias veces. Ordénalos de más suave a más directo (el modo reglas usa el primero y el último).</p>
-        ${c.ctas.map((cta, i) => `
-          <div class="variant" data-cta="${i}"><div class="grid2">
-            <div><label>Nombre</label><input type="text" data-k="label" value="${esc(cta.label)}"></div>
-            <div><label>Cuándo usarlo <span class="hint">(lo lee Jev)</span></label><input type="text" data-k="description" value="${esc(cta.description)}"></div>
-          </div><div style="margin-top:8px"><label>Texto</label><input type="text" data-k="text" value="${esc(cta.text)}"></div>
-          <button class="btn danger small" data-remove-cta="${i}" style="margin-top:8px">Quitar</button></div>`).join('')}
-        <button class="btn ghost small" id="add-cta" style="margin-top:10px">+ CTA</button>
+        ${c.steps.length < (meta.max_total_steps || 7) ? `<button class="btn ghost" data-add-step="email" ${emailCount() >= meta.max_steps ? 'disabled' : ''}>+ Correo de seguimiento</button>
+          <button class="btn ghost" data-add-step="call">+ Tarea de llamada</button>
+          <button class="btn ghost" data-add-step="linkedin">+ Tarea de LinkedIn</button>` : ''}
+        <span class="muted small">${emailCount()}/${meta.max_steps} correos (buena práctica: ~4 toques por email).</span>
       </div>
       <div class="row" style="position:sticky;bottom:0;background:var(--bg);padding:12px 0"><button class="btn" id="save">Guardar secuencia</button></div>`;
     bind();
-    $$('[data-lint]', el).forEach((box) => lint(box));
+    $$('[data-variant]', el).forEach((v) => lint(v));
   }
 
   function stepHtml(s, i) {
     const n = i + 1;
-    const needsSubject = n === 1 || !s.same_thread;
-    return `<div class="card step" data-step="${i}">
+    const email = s.channel === 'email';
+    const needsSubject = email && (n === 1 || !s.same_thread);
+    return `<div class="card step ${email ? '' : 'step-task'}" data-step="${i}">
       <div class="step-head"><div class="step-num">${n}</div>
-        <b>${n === 1 ? 'Correo inicial' : `Follow-up ${n - 1}`}</b>
-        ${n > 1 ? `<label class="check">Esperar <input type="number" min="1" max="60" style="width:70px" data-step-k="delay_days" value="${esc(s.delay_days)}"> días después del anterior</label>
-          <label class="check"><input type="checkbox" data-step-k="same_thread" ${s.same_thread ? 'checked' : ''}> Responder en el mismo hilo (Re:)</label>` : ''}
-        ${n > 1 && n === c.steps.length ? `<button class="btn danger small" data-remove-step="${i}">Quitar paso</button>` : ''}
+        <b>${email ? (n === 1 ? 'Primer correo' : 'Correo de seguimiento') : CHANNEL_LABEL[s.channel]}</b>
+        ${n > 1 ? `<label class="check">Esperar <input type="number" min="1" max="60" style="width:70px" data-step-k="delay_days" value="${esc(s.delay_days)}"> días después del paso anterior</label>` : ''}
+        ${email && n > 1 ? `<label class="check"><input type="checkbox" data-step-k="same_thread" ${s.same_thread ? 'checked' : ''}> En el mismo hilo (Re:)</label>` : ''}
+        ${n > 1 ? `<button class="btn danger small" data-remove-step="${i}">Quitar paso</button>` : ''}
       </div>
-      <p class="muted small">Variantes = ángulos de mensaje. Si hay más de una, Jev elige la mejor para cada prospecto (o se rota A/B sin Jev).</p>
+      <p class="muted small">${email
+        ? (n === 1 ? 'Crea 2–3 variantes por segmento: Jev elige la mejor para cada prospecto y aprende de los resultados.' : 'Variantes = ángulos distintos. Jev elige según perfil e interacción.')
+        : 'Genera una tarea con este guion para una persona del equipo; la secuencia continúa al marcarla como hecha.'}</p>
       ${s.variants.map((v, j) => `
         <div class="variant" data-variant="${j}">
-          <div class="grid2">
-            <div><label>Nombre de variante</label><input type="text" data-k="label" value="${esc(v.label)}"></div>
-            <div><label>Ángulo <span class="hint">(descripción para Jev)</span></label><input type="text" data-k="angle" value="${esc(v.angle)}" placeholder="p. ej. caso de éxito con métrica"></div>
+          <div class="grid3">
+            <div><label>Nombre</label><input type="text" data-k="label" value="${esc(v.label)}"></div>
+            ${email ? `<div><label>Ángulo <span class="hint">(lo lee Jev)</span></label><input type="text" data-k="angle" value="${esc(v.angle)}"></div>` : ''}
+            ${c.segments.length ? `<div><label>Segmento</label><select data-k="segment">${segmentOptions(c.segments, v.segment)}</select></div>` : ''}
           </div>
-          ${needsSubject ? `<div style="margin-top:8px"><label>Asunto <span class="hint">(2–6 palabras, minúsculas)</span></label><input type="text" data-k="subject" data-lint value="${esc(v.subject)}"></div>` : ''}
-          <div style="margin-top:8px"><label>Cuerpo <span class="hint">(texto plano, ${n === 1 ? '50–125' : '30–90'} palabras, una sola pregunta)</span></label>
+          ${needsSubject ? `<div style="margin-top:8px"><label>Asunto <span class="hint">(3–7 palabras, conversacional, sin emojis)</span></label><input type="text" data-k="subject" data-lint value="${esc(v.subject)}"></div>` : ''}
+          <div style="margin-top:8px"><label>${email ? `Cuerpo <span class="hint">(45–85 palabras renderizado; 3 párrafos; una acción)</span>` : 'Guion / mensaje'}</label>
             <textarea data-k="body" data-lint>${esc(v.body)}</textarea></div>
-          <ul class="lint" data-lint-out></ul>
+          <div data-lint-out></div>
           <div class="row" style="margin-top:6px">
-            ${v.id ? `<button class="btn ghost small" data-preview="${v.id}" data-step-number="${n}">Vista previa</button>` : '<span class="muted small">Guarda para ver la vista previa</span>'}
+            ${v.id ? `<button class="btn ghost small" data-preview="${v.id}" data-step-number="${n}">Vista previa con un prospecto</button>` : '<span class="muted small">Guarda para ver la vista previa</span>'}
             ${s.variants.length > 1 ? `<button class="btn danger small" data-remove-variant="${j}">Quitar variante</button>` : ''}
           </div>
         </div>`).join('')}
-      ${s.variants.length < 5 ? '<button class="btn ghost small" data-add-variant style="margin-top:10px">+ Variante (A/B)</button>' : ''}
+      ${s.variants.length < 12 ? '<button class="btn ghost small" data-add-variant style="margin-top:10px">+ Variante</button>' : ''}
     </div>`;
   }
 
   const lintTimers = new Map();
-  function lint(input) {
-    const variantEl = input.closest('[data-variant]');
-    const stepIndex = Number(input.closest('[data-step]').dataset.step);
-    const v = c.steps[stepIndex].variants[Number(variantEl.dataset.variant)];
+  function lint(variantEl) {
+    const stepEl = variantEl.closest('[data-step]');
+    const stepIndex = Number(stepEl.dataset.step);
+    const step = c.steps[stepIndex];
+    const out = $('[data-lint-out]', variantEl);
+    if (step.channel !== 'email') { out.innerHTML = ''; return; }
+    const v = step.variants[Number(variantEl.dataset.variant)];
     clearTimeout(lintTimers.get(variantEl));
     lintTimers.set(variantEl, setTimeout(async () => {
-      const r = await api('/lint', { method: 'POST', body: { subject: v.subject || '', body: v.body || '', step_number: stepIndex + 1 } }).catch(() => null);
-      if (!r) return;
-      const out = $('[data-lint-out]', variantEl);
-      out.className = `lint ${r.warnings.length ? '' : 'ok'}`;
-      out.innerHTML = r.warnings.length
-        ? r.warnings.map((w) => `<li>${esc(w.message)}</li>`).join('')
-        : `<li>✓ ${r.wordCount} palabras · cumple las buenas prácticas</li>`;
+      const r = await api('/lint', { method: 'POST', body: { subject: v.subject || '', body: v.body || '', step_number: stepIndex + 1, thread_reply: stepIndex > 0 && step.same_thread } }).catch(() => null);
+      if (r) out.innerHTML = issuesHtml(r.issues, 'La plantilla cumple las reglas (el largo final se revisa por prospecto)');
     }, 350));
   }
 
@@ -350,28 +389,26 @@ async function renderSequence(el, campaign) {
       $$('[data-variant]', stepEl).forEach((vEl) => {
         const v = s.variants[Number(vEl.dataset.variant)];
         $$('[data-k]', vEl).forEach((inp) => {
-          inp.addEventListener('focus', () => { lastField = inp; });
-          inp.addEventListener('input', () => { v[inp.dataset.k] = inp.value; if (inp.hasAttribute('data-lint')) lint(inp); });
+          inp.addEventListener('focus', () => { if (inp.tagName !== 'SELECT') lastField = inp; });
+          inp.addEventListener(inp.tagName === 'SELECT' ? 'change' : 'input', () => { v[inp.dataset.k] = inp.value; if (inp.hasAttribute('data-lint')) lint(vEl); });
         });
       });
       $$('[data-remove-variant]', stepEl).forEach((b) => b.addEventListener('click', () => { s.variants.splice(Number(b.dataset.removeVariant), 1); draw(); }));
       $('[data-add-variant]', stepEl)?.addEventListener('click', () => {
         const base = s.variants[0];
-        s.variants.push({ label: `${String.fromCharCode(65 + s.variants.length)} · nueva`, angle: '', subject: base.subject, body: base.body });
+        s.variants.push({ label: `${String.fromCharCode(65 + s.variants.length)} · nueva`, angle: '', segment: base.segment, subject: base.subject, body: base.body });
         draw();
       });
     });
     $$('[data-remove-step]', el).forEach((b) => b.addEventListener('click', () => { c.steps.splice(Number(b.dataset.removeStep), 1); draw(); }));
-    $('#add-step', el)?.addEventListener('click', () => {
-      c.steps.push({ delay_days: 3, same_thread: true, variants: [{ label: 'A', angle: '', subject: '', body: '{{first_name}}, ' }] });
+    $$('[data-add-step]', el).forEach((b) => b.addEventListener('click', () => {
+      const channel = b.dataset.addStep;
+      const body = channel === 'email' ? '{{first_name}}, \n\n{{cta}}'
+        : channel === 'call' ? 'Llamar a {{first_name}} ({{title}} en {{company}}). Referenciar el último correo.'
+          : 'Visitar el perfil de {{first_name}} y enviar invitación con nota breve (máx. 300 caracteres) mencionando {{company}}.';
+      c.steps.push({ channel, delay_days: channel === 'email' ? 3 : 2, same_thread: true, variants: [{ label: channel === 'email' ? 'A' : 'Guion', angle: '', segment: '', subject: '', body }] });
       draw();
-    });
-    $$('[data-cta]', el).forEach((ctaEl) => {
-      const cta = c.ctas[Number(ctaEl.dataset.cta)];
-      $$('[data-k]', ctaEl).forEach((inp) => inp.addEventListener('input', () => { cta[inp.dataset.k] = inp.value; }));
-    });
-    $$('[data-remove-cta]', el).forEach((b) => b.addEventListener('click', () => { c.ctas.splice(Number(b.dataset.removeCta), 1); draw(); }));
-    $('#add-cta', el).addEventListener('click', () => { c.ctas.push({ label: 'Nuevo', description: '', text: '' }); draw(); });
+    }));
     $$('[data-field]', el).forEach((chip) => chip.addEventListener('click', () => {
       if (!lastField) return toast('Primero haz clic en un asunto o cuerpo');
       const tag = `{{${chip.dataset.field}}}`;
@@ -381,16 +418,7 @@ async function renderSequence(el, campaign) {
       lastField.focus();
       lastField.setSelectionRange(a + tag.length, a + tag.length);
     }));
-    $$('[data-preview]', el).forEach((b) => b.addEventListener('click', () => guard(b, async () => {
-      const p = await api(`/campaigns/${c.id}/preview`, { method: 'POST', body: { step_number: Number(b.dataset.stepNumber), variant_id: Number(b.dataset.preview) } });
-      openModal(`<h2>Vista previa · ${esc(p.variant.label)}</h2>
-        <p class="muted small">Para ${esc(p.prospect.name || p.prospect.email)} &lt;${esc(p.prospect.email)}&gt; ${p.missing.length ? `· <b style="color:var(--bad)">faltan: ${esc(p.missing.join(', '))}</b>` : ''}</p>
-        <p><b>Asunto:</b> ${esc(p.subject)}</p>
-        <div class="preview-mail">${esc(p.body)}</div>
-        ${p.signature_html ? '<p class="muted small" style="margin-top:10px">Firma del sender:</p><iframe class="sig" sandbox></iframe>' : '<p class="muted small">Asigna un sender con firma para verla aquí.</p>'}`);
-      const frame = $('#modal-body iframe.sig');
-      if (frame) frame.srcdoc = `<div style="font-family:Arial,sans-serif;font-size:14px">${p.signature_html}</div>`;
-    })));
+    $$('[data-preview]', el).forEach((b) => b.addEventListener('click', () => guard(b, () => showPreview(c, Number(b.dataset.stepNumber), Number(b.dataset.preview)))));
     $('#save', el).addEventListener('click', async (e) => {
       const saved = await saveCampaign(c, e.currentTarget);
       if (saved) { Object.assign(c, structuredClone(saved)); draw(); }
@@ -399,24 +427,81 @@ async function renderSequence(el, campaign) {
   draw();
 }
 
-// --- Settings --------------------------------------------------------------
+async function showPreview(c, stepNumber, variantId, prospectId) {
+  const p = await api(`/campaigns/${c.id}/preview`, { method: 'POST', body: { step_number: stepNumber, variant_id: variantId, prospect_id: prospectId } });
+  const body = openModal(`<h2>Vista previa · ${esc(p.variant.label)}</h2>
+    <p class="muted small">Para ${esc(p.prospect.name || p.prospect.email)} &lt;${esc(p.prospect.email)}&gt; · ganchos disponibles para este prospecto: ${esc(p.available_hooks.join(', ') || 'ninguno')}</p>
+    ${p.channel === 'email' ? `<p><b>Asunto:</b> ${esc(p.subject)}</p>` : `<p><b>${esc(CHANNEL_LABEL[p.channel])}</b></p>`}
+    <div class="preview-mail">${esc(p.body)}</div>
+    ${p.quality ? `<p class="small" style="margin-top:10px"><b>Control de calidad</b> · ${p.quality.wordCount} palabras</p>${issuesHtml(p.quality.issues, 'Cumple todas las reglas')}` : ''}
+    ${p.channel === 'email' ? (p.signature_html ? '<p class="muted small">Firma del remitente:</p><iframe class="sig" sandbox></iframe>' : '<p class="notice">Asigna un sender con firma: es obligatoria.</p>') : ''}`);
+  const frame = $('iframe.sig', body);
+  if (frame) frame.srcdoc = `<div style="font-family:Arial,sans-serif;font-size:14px">${p.signature_html}</div>`;
+}
+
+// --- Personalization library: segments, hooks, problems, CTAs --------------
+function renderLibrary(el, campaign) {
+  const c = structuredClone(campaign);
+  const lists = {
+    segments: { title: 'Segmentos', help: 'Grupos comerciales (industria + cargo). Jev asigna cada prospecto al segmento que mejor lo describe; las variantes y bibliotecas pueden ser específicas de un segmento.', fields: ['name', 'description'], blank: { name: 'Nuevo segmento', description: '' } },
+    hooks: { title: 'Ganchos de personalización {{gancho}}', help: 'Primer párrafo: contexto real y verificable de la persona. Usa campos del archivo (p. ej. {{noticia}}, {{title}}). Un gancho solo se ofrece a Jev si TODOS sus campos tienen dato para ese prospecto.', fields: ['label', 'description', 'segment', 'text'], blank: { label: 'Nuevo gancho', description: '', segment: '', text: '' } },
+    problems: { title: 'Hipótesis de problema {{problema}}', help: 'Segundo párrafo: un problema probable para ese rol y sector, dicho con humildad ("en equipos parecidos vemos…").', fields: ['label', 'description', 'segment', 'text'], blank: { label: 'Nuevo problema', description: '', segment: '', text: '' } },
+    ctas: { title: 'Llamados a la acción {{cta}}', help: 'Tercer párrafo: una sola pregunta o propuesta breve. Ordénalos de más suave a más directo; Jev escala según la interacción.', fields: ['label', 'description', 'text'], blank: { label: 'Nuevo CTA', description: '', text: '' } },
+  };
+  const labels = { name: 'Nombre', label: 'Nombre', description: 'Cuándo usarlo (lo lee Jev)', segment: 'Segmento', text: 'Texto' };
+
+  function draw() {
+    el.innerHTML = Object.entries(lists).map(([key, cfg]) => `
+      <div class="card" data-list="${key}">
+        <h2>${esc(cfg.title)}</h2><p class="muted small">${esc(cfg.help)}</p>
+        ${c[key].map((item, i) => `<div class="variant" data-item="${i}">
+          <div class="grid3">${cfg.fields.filter((f) => f !== 'text').map((f) => `<div><label>${labels[f]}</label>${f === 'segment'
+            ? `<select data-k="segment">${segmentOptions(c.segments, item.segment)}</select>`
+            : `<input type="text" data-k="${f}" value="${esc(item[f])}">`}</div>`).join('')}</div>
+          ${cfg.fields.includes('text') ? `<div style="margin-top:8px"><label>Texto</label><textarea data-k="text" style="min-height:60px">${esc(item.text)}</textarea></div>` : ''}
+          <button class="btn danger small" data-remove="${i}" style="margin-top:8px">Quitar</button></div>`).join('') || '<p class="muted small">Vacío.</p>'}
+        <button class="btn ghost small" data-add style="margin-top:10px">+ Agregar</button>
+      </div>`).join('') + '<button class="btn" id="save-library">Guardar personalización</button>';
+    $$('[data-list]', el).forEach((listEl) => {
+      const key = listEl.dataset.list;
+      $$('[data-item]', listEl).forEach((itemEl) => {
+        const item = c[key][Number(itemEl.dataset.item)];
+        $$('[data-k]', itemEl).forEach((inp) => inp.addEventListener(inp.tagName === 'SELECT' ? 'change' : 'input', () => { item[inp.dataset.k] = inp.value; }));
+      });
+      $$('[data-remove]', listEl).forEach((b) => b.addEventListener('click', () => { c[key].splice(Number(b.dataset.remove), 1); draw(); }));
+      $('[data-add]', listEl).addEventListener('click', () => { c[key].push({ ...lists[key].blank }); draw(); });
+    });
+    $('#save-library').addEventListener('click', async (e) => {
+      const saved = await saveCampaign(c, e.currentTarget);
+      if (saved) { Object.assign(c, structuredClone(saved)); draw(); }
+    });
+  }
+  draw();
+}
+
+// --- Settings ------------------------------------------------------------------
 function renderSettings(el, campaign, senders) {
   const c = structuredClone(campaign);
   const zones = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [c.timezone];
   el.innerHTML = `
     <div class="card stack">
       <div><label>Nombre</label><input type="text" id="s-name" value="${esc(c.name)}"></div>
-      <div><label>Oferta <span class="hint">— qué resuelves y para quién. Jev lo usa para decidir ángulo, CTA y si el prospecto encaja.</span></label>
+      <div><label>Oferta <span class="hint">— qué resuelves y para quién. Jev la usa para elegir ángulo, problema y CTA.</span></label>
         <textarea id="s-offer" style="min-height:80px">${esc(c.offer)}</textarea></div>
-      <div><label>Perfil de cliente ideal (ICP) <span class="hint">— industria, tamaño, cargos. Jev puntúa el encaje y prioriza a los mejores.</span></label>
+      <div><label>Perfil de cliente ideal (ICP) <span class="hint">— industria, tamaño, cargos, país. Jev puntúa el encaje, prioriza y excluye a quien claramente no encaja.</span></label>
         <textarea id="s-icp" style="min-height:80px">${esc(c.icp)}</textarea></div>
+    </div>
+    <div class="card">
+      <h2>Aprobación</h2>
+      ${Object.entries(APPROVAL_LABEL).map(([k, l]) => `<label class="check"><input type="radio" name="approval" value="${k}" ${c.approval_mode === k ? 'checked' : ''}> ${esc(l)}</label>`).join('')}
+      <p class="muted small">Los errores de calidad (enlaces en el primer correo, emojis, datos faltantes, remitente sin firma, lead inválido) siempre requieren revisión humana.</p>
     </div>
     <div class="card">
       <h2>Senders (Google Workspace)</h2>
       ${senders.length ? senders.map((s) => `<label class="check"><input type="checkbox" data-sender="${s.id}" ${c.sender_ids.includes(s.id) ? 'checked' : ''}>
-        ${esc(s.display_name || s.email)} &lt;${esc(s.email)}&gt; ${badge(s.status)} <span class="muted small">límite ${s.daily_limit}/día</span></label>`).join('')
+        ${esc(s.display_name || s.email)} &lt;${esc(s.email)}&gt; ${badge(s.status)} <span class="muted small">límite ${s.daily_limit}/día${s.signature_html ? '' : ' · <b style="color:var(--bad)">sin firma</b>'}</span></label>`).join('')
         : '<p class="muted">No tienes senders. <a href="#/senders">Conecta uno</a>.</p>'}
-      <p class="muted small">Con varios senders los prospectos nuevos se reparten (rotación); cada follow-up sale del mismo buzón que el primer correo.</p>
+      <p class="muted small">Con varios senders los prospectos nuevos se reparten; cada seguimiento sale del mismo buzón que el primer correo.</p>
     </div>
     <div class="card">
       <h2>Ventana de envío</h2>
@@ -425,13 +510,13 @@ function renderSettings(el, campaign, senders) {
         <div class="row"><div><label>Desde</label><input type="time" id="s-start" value="${esc(c.window_start)}"></div><div><label>Hasta</label><input type="time" id="s-end" value="${esc(c.window_end)}"></div></div>
       </div>
       <div class="row" style="margin-top:10px">${DAYS.map(([d, l]) => `<label class="check"><input type="checkbox" data-day="${d}" ${c.send_days.includes(d) ? 'checked' : ''}>${l}</label>`).join('')}</div>
-      <p class="muted small">Mejores resultados: martes a jueves, en horario laboral del prospecto. Jev divide la ventana en tres franjas y elige la mejor según cuándo abrió cada prospecto.</p>
+      <p class="muted small">Jev divide la ventana en tres franjas y elige la mejor para cada prospecto según cuándo abrió antes.</p>
     </div>
     <div class="card stack">
       <h2>Opciones</h2>
-      <label class="check"><input type="checkbox" id="s-jev" ${c.jev_enabled ? 'checked' : ''}> Usar Jev para decidir mensaje, CTA, momento y a quién contactar ${meta.jev_configured ? '' : '<span class="badge warn">falta TYPESAFE_API_KEY → reglas</span>'}</label>
-      <label class="check"><input type="checkbox" id="s-opens" ${c.track_opens ? 'checked' : ''}> Rastrear aperturas (pixel). <span class="muted small">Puede afectar ligeramente la entregabilidad; Apple Mail infla aperturas.</span></label>
-      <label class="check"><input type="checkbox" id="s-unsub" ${c.include_unsubscribe ? 'checked' : ''}> Incluir enlace y cabecera de baja (recomendado / requerido en muchos países)</label>
+      <label class="check"><input type="checkbox" id="s-jev" ${c.jev_enabled ? 'checked' : ''}> Usar Jev para segmentar, decidir mensaje, gancho, problema, CTA y momento ${meta.jev_configured ? '' : '<span class="badge warn">falta TYPESAFE_API_KEY → reglas</span>'}</label>
+      <label class="check"><input type="checkbox" id="s-opens" ${c.track_opens ? 'checked' : ''}> Rastrear aperturas (pixel). <span class="muted small">Afecta un poco la entregabilidad; Apple Mail infla aperturas.</span></label>
+      <label class="check"><input type="checkbox" id="s-unsub" ${c.include_unsubscribe ? 'checked' : ''}> Incluir enlace y cabecera de baja (cumplimiento)</label>
       <label class="check"><input type="checkbox" id="s-reply" ${c.stop_on_reply ? 'checked' : ''}> Detener la secuencia cuando el prospecto responde (las auto-respuestas no la detienen)</label>
     </div>
     <button class="btn" id="save-settings">Guardar configuración</button>`;
@@ -441,127 +526,234 @@ function renderSettings(el, campaign, senders) {
       window_start: $('#s-start').value, window_end: $('#s-end').value,
       send_days: $$('[data-day]').filter((x) => x.checked).map((x) => Number(x.dataset.day)),
       sender_ids: $$('[data-sender]').filter((x) => x.checked).map((x) => Number(x.dataset.sender)),
+      approval_mode: $('input[name=approval]:checked')?.value || 'first',
       jev_enabled: $('#s-jev').checked, track_opens: $('#s-opens').checked, include_unsubscribe: $('#s-unsub').checked, stop_on_reply: $('#s-reply').checked,
     });
     if (await saveCampaign(c, e.currentTarget)) router();
   });
 }
 
-// --- Prospects ---------------------------------------------------------------
-async function renderProspects(el, campaign, { page = 1, status = '', q = '' } = {}) {
-  const params = new URLSearchParams({ page, status, q });
-  const data = await api(`/campaigns/${campaign.id}/prospects?${params}`);
+// --- Prospects -------------------------------------------------------------------
+async function renderProspects(el, campaign, filters = {}) {
+  const { page = 1, status = '', validation = '', segment = '', q = '' } = filters;
+  const data = await api(`/campaigns/${campaign.id}/prospects?${new URLSearchParams({ page, status, validation, segment, q })}`);
+  const bases = meta.lawful_bases || {};
   el.innerHTML = `
     <div class="card">
-      <h2>Importar CSV</h2>
-      <p class="muted small">Columna obligatoria: <code>email</code> (o <code>correo</code>). Reconoce nombre/first_name, apellido, empresa/company, cargo/title. Cualquier otra columna se vuelve un campo de personalización (p. ej. <code>ciudad</code> → <code>{{ciudad}}</code>). Se omiten duplicados y correos dados de baja.</p>
-      <form id="import-form" class="row"><input type="file" id="csv" accept=".csv,text/csv" required><button class="btn" type="submit">Importar</button></form>
+      <h2>Importar leads (CSV o Excel)</h2>
+      <p class="muted small">Columna obligatoria: <code>email</code>/<code>correo</code>. Reconoce nombre, apellido, empresa, cargo, industria/sector, país, teléfono y LinkedIn. Cualquier otra columna se vuelve un campo (<code>noticia</code> → <code>{{noticia}}</code>). Cada lead se valida: formato, dominio con MX, cuentas genéricas o personales, desechables, duplicados y lista de baja.</p>
+      <form id="import-form" class="stack">
+        <div class="grid3">
+          <div><label>Archivo</label><input type="file" id="csv" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required></div>
+          <div><label>Origen de los datos <span class="hint">(fuente autorizada)</span></label><input type="text" id="imp-source" required placeholder="p. ej. CRM propio, evento, Apollo"></div>
+          <div><label>Base legal</label><select id="imp-basis" required><option value="">Selecciona…</option>${Object.entries(bases).map(([k, v]) => `<option value="${esc(k)}">${esc(v)}</option>`).join('')}</select></div>
+        </div>
+        <div><button class="btn" type="submit">Importar y validar</button></div>
+      </form>
       <div id="import-result"></div>
     </div>
     <div class="card">
       <div class="row between">
         <h2>${data.total} prospectos</h2>
         <div class="row">
-          <input type="text" id="p-q" placeholder="Buscar…" value="${esc(q)}" style="width:180px">
-          <select id="p-status" style="width:auto"><option value="">Todos</option>${['active', 'finished', 'replied', 'bounced', 'unsubscribed', 'stopped'].map((s) => `<option value="${s}" ${s === status ? 'selected' : ''}>${STATUS_LABEL[s]}</option>`).join('')}</select>
+          <input type="text" id="p-q" placeholder="Buscar…" value="${esc(q)}" style="width:160px">
+          <select id="p-status" style="width:auto"><option value="">Estado</option>${['active', 'finished', 'replied', 'bounced', 'unsubscribed', 'stopped'].map((s) => `<option value="${s}" ${s === status ? 'selected' : ''}>${STATUS_LABEL[s]}</option>`).join('')}</select>
+          <select id="p-validation" style="width:auto"><option value="">Validación</option>${Object.entries(VALIDATION_LABEL).map(([k, l]) => `<option value="${k}" ${k === validation ? 'selected' : ''}>${l}</option>`).join('')}</select>
+          ${campaign.segments.length ? `<select id="p-segment" style="width:auto"><option value="">Segmento</option>${campaign.segments.map((sg) => `<option value="${sg.id}" ${String(sg.id) === String(segment) ? 'selected' : ''}>${esc(sg.name)}</option>`).join('')}<option value="none" ${segment === 'none' ? 'selected' : ''}>Sin segmento</option></select>` : ''}
         </div>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Prospecto</th><th>Empresa</th><th>Estado</th><th>Paso</th><th>Aperturas</th><th>Encaje</th><th>Próximo envío</th></tr></thead>
+        <thead><tr><th>Prospecto</th><th>Empresa</th><th>Validación</th><th>Segmento / encaje</th><th>Estado</th><th>Paso</th><th>Próximo</th></tr></thead>
         <tbody>${data.prospects.map((p) => `
           <tr class="clickable" data-prospect="${p.id}">
             <td><b>${esc([p.first_name, p.last_name].filter(Boolean).join(' ') || '—')}</b><br><span class="muted small">${esc(p.email)}</span></td>
-            <td>${esc(p.company)}<br><span class="muted small">${esc(p.title)}</span></td>
-            <td>${badge(p.status)}${p.reply_category ? `<br><span class="small">${esc(REPLY_LABEL[p.reply_category] || p.reply_category)}</span>` : ''}${p.stop_reason && p.status === 'stopped' ? `<br><span class="small muted">${esc(p.stop_reason)}</span>` : ''}${p.last_error ? `<br><span class="small" style="color:var(--bad)">${esc(p.last_error)}</span>` : ''}</td>
-            <td>${p.current_step}/${campaign.steps.length}</td><td>${p.opens}</td>
-            <td>${p.fit_score === null ? '—' : `${Math.round(p.fit_score * 100)}%`}</td>
-            <td class="small">${p.status === 'active' ? fmtDate(p.next_send_at) : '—'}</td>
+            <td>${esc(p.company)}<br><span class="muted small">${esc(p.title)}${p.industry ? ` · ${esc(p.industry)}` : ''}</span></td>
+            <td>${validationBadge(p.validation_status)}${p.validation_notes ? `<br><span class="small muted">${esc(p.validation_notes)}</span>` : ''}</td>
+            <td>${p.intel_at ? `${esc(p.segment || 'Sin segmento')}<br><span class="small muted">${p.fit_score === null ? '' : `encaje ${Math.round(p.fit_score * 100)}%`}</span>` : (p.status === 'active' ? '<span class="muted small">analizando…</span>' : '—')}</td>
+            <td>${badge(p.status)}${p.outcome ? ` <span class="badge ok">${esc(OUTCOME_LABEL[p.outcome])}</span>` : ''}${p.pending_drafts ? ' <span class="badge warn">por aprobar</span>' : ''}
+              ${p.reply_category ? `<br><span class="small">${esc(REPLY_LABEL[p.reply_category] || p.reply_category)}</span>` : ''}${p.stop_reason && p.status === 'stopped' ? `<br><span class="small muted">${esc(p.stop_reason)}</span>` : ''}${p.last_error ? `<br><span class="small" style="color:var(--bad)">${esc(p.last_error)}</span>` : ''}</td>
+            <td>${p.current_step}/${campaign.steps.length}</td>
+            <td class="small">${p.status === 'active' && p.next_send_at ? fmtDate(p.next_send_at) : '—'}</td>
           </tr>`).join('') || '<tr><td colspan="7" class="empty">Sin prospectos</td></tr>'}</tbody>
       </table></div>
       ${data.pages > 1 ? `<div class="row" style="margin-top:10px">${page > 1 ? '<button class="btn ghost small" id="prev">← Anterior</button>' : ''}<span class="muted small">Página ${page} de ${data.pages}</span>${page < data.pages ? '<button class="btn ghost small" id="next">Siguiente →</button>' : ''}</div>` : ''}
     </div>`;
-  const reload = (opts) => renderProspects(el, campaign, { page, status, q, ...opts });
+  const reload = (opts) => renderProspects(el, campaign, { page, status, validation, segment, q, ...opts });
   $('#import-form').addEventListener('submit', (e) => {
     e.preventDefault();
     guard(e.submitter, async () => {
       const form = new FormData();
+      form.append('source', $('#imp-source').value);
+      form.append('lawful_basis', $('#imp-basis').value);
       form.append('file', $('#csv').files[0]);
       const r = await api(`/campaigns/${campaign.id}/prospects/import`, { method: 'POST', form });
       toast(`${r.imported} importados`);
       await reload({ page: 1 });
-      $('#import-result').innerHTML = `<p class="notice info">${r.imported} importados · ${r.duplicates} duplicados · ${r.suppressed} en lista de baja · ${r.invalid.length} inválidos.
-        Columnas detectadas: ${Object.entries(r.mapping).map(([k, v]) => `${esc(k)} ← ${esc(v)}`).join(', ')}</p>
-        ${r.invalid.length ? `<p class="small muted">Inválidos: ${r.invalid.slice(0, 20).map((i) => `fila ${i.row} (${esc(i.email || 'vacío')})`).join(', ')}</p>` : ''}`;
+      $('#import-result').innerHTML = `
+        <div class="grid4" style="margin-top:12px">${[['Importados', r.imported], ['Válidos', r.valid], ['Riesgosos', r.risky], ['Inválidos', r.invalid], ['Duplicados', r.duplicates], ['En lista de baja', r.suppressed], ['En otra campaña', r.contacted_elsewhere]]
+          .map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('')}</div>
+        <p class="small muted">Columnas detectadas: ${Object.entries(r.mapping).map(([k, v]) => `${esc(k)} ← ${esc(v)}`).join(', ')}. Los inválidos quedan detenidos; los riesgosos pasan por aprobación. La inteligencia comercial (segmento y encaje) se calcula en el próximo ciclo o con "Procesar ahora".</p>
+        ${r.invalid_rows.length ? `<details><summary class="small">Ver inválidos</summary><ul class="small">${r.invalid_rows.slice(0, 100).map((i) => `<li>${esc(i.email || `fila ${i.row}`)}: ${esc(i.reason)}</li>`).join('')}</ul></details>` : ''}
+        ${r.risky_rows.length ? `<details><summary class="small">Ver riesgosos</summary><ul class="small">${r.risky_rows.map((i) => `<li>${esc(i.email)}: ${esc(i.reason)}</li>`).join('')}</ul></details>` : ''}`;
     });
   });
   let searchTimer;
   $('#p-q').addEventListener('input', (e) => { clearTimeout(searchTimer); searchTimer = setTimeout(() => reload({ q: e.target.value, page: 1 }), 300); });
   $('#p-status').addEventListener('change', (e) => reload({ status: e.target.value, page: 1 }));
+  $('#p-validation').addEventListener('change', (e) => reload({ validation: e.target.value, page: 1 }));
+  $('#p-segment')?.addEventListener('change', (e) => reload({ segment: e.target.value, page: 1 }));
   $('#prev')?.addEventListener('click', () => reload({ page: page - 1 }));
   $('#next')?.addEventListener('click', () => reload({ page: page + 1 }));
   $$('[data-prospect]', el).forEach((tr) => tr.addEventListener('click', () => showProspect(campaign, Number(tr.dataset.prospect), reload)));
 }
 
 async function showProspect(campaign, id, reload) {
-  const { prospect: p, messages, opens, decisions } = await api(`/prospects/${id}`);
+  const { prospect: p, messages, opens, decisions, tasks, drafts } = await api(`/prospects/${id}`);
   const body = openModal(`
-    <h2>${esc([p.first_name, p.last_name].filter(Boolean).join(' ') || p.email)} ${badge(p.status)}</h2>
-    <p class="muted">${esc(p.email)} · ${esc(p.title)} ${p.company ? `en ${esc(p.company)}` : ''}</p>
+    <h2>${esc([p.first_name, p.last_name].filter(Boolean).join(' ') || p.email)} ${badge(p.status)} ${p.outcome ? `<span class="badge ok">${esc(OUTCOME_LABEL[p.outcome])}</span>` : ''}</h2>
+    <p class="muted">${esc(p.email)} · ${esc(p.title)} ${p.company ? `en ${esc(p.company)}` : ''} ${p.phone ? `· ${esc(p.phone)}` : ''} ${p.linkedin_url ? `· <a href="${esc(p.linkedin_url)}" target="_blank" rel="noopener">LinkedIn</a>` : ''}</p>
+    <p class="small">${validationBadge(p.validation_status)} ${esc(p.validation_notes)} · Segmento: <b>${esc(p.segment || 'sin segmento')}</b>${p.fit_score !== null ? ` · encaje ${Math.round(p.fit_score * 100)}%` : ''} · Origen: ${esc(p.source || '—')} (${esc((meta.lawful_bases || {})[p.lawful_basis] || p.lawful_basis || '—')})</p>
     ${p.stop_reason ? `<p class="notice">${esc(p.stop_reason)}</p>` : ''}
     <div class="row">
+      <span class="small"><b>Resultado:</b></span>
+      ${Object.entries(OUTCOME_LABEL).map(([k, l]) => `<button class="btn ${p.outcome === k ? '' : 'ghost'} small" data-outcome="${k}">${l}</button>`).join('')}
+    </div>
+    <div class="row" style="margin-top:8px">
       ${p.status === 'active' ? '<button class="btn danger small" id="p-stop">Detener secuencia</button>' : ''}
-      ${p.status === 'stopped' ? '<button class="btn small" id="p-resume">Reanudar</button>' : ''}
+      ${p.status === 'stopped' && p.validation_status !== 'invalid' ? '<button class="btn small" id="p-resume">Reanudar</button>' : ''}
       ${p.status === 'active' ? '<button class="btn ghost small" id="p-sim">Simular decisión de Jev</button>' : ''}
       <button class="btn danger small" id="p-delete">Eliminar</button>
     </div>
     <div id="p-sim-out"></div>
-    <h3 style="margin-top:16px">Datos</h3>
+    <h3 style="margin-top:16px">Datos del archivo</h3>
     <pre class="json">${esc(JSON.stringify(p.fields, null, 2))}</pre>
+    ${drafts.length ? `<h3>Borradores</h3>${drafts.map((d) => `<p class="small">Paso ${d.step_number} · ${esc(d.subject)} · ${d.status === 'pending' ? '<span class="badge warn">por aprobar</span>' : '<span class="badge ok">aprobado</span>'}</p>`).join('')}` : ''}
     <h3>Correos enviados</h3>
     ${messages.map((m) => `<div class="variant"><div class="row between"><b>Paso ${m.step_number} · ${esc(m.subject)}</b><span class="small muted">${fmtDate(m.sent_at)} · ${esc(m.sender_email || '')}</span></div>
       <p class="small muted">Variante: ${esc(m.variant_label || '—')} · CTA: ${esc(m.cta_label || '—')} · Aperturas: ${m.open_count}${m.last_opened_at ? ` (última ${fmtDate(m.last_opened_at)})` : ''}</p>
       <div class="preview-mail small">${esc(m.body_text)}</div></div>`).join('') || '<p class="muted">Aún no se ha enviado nada.</p>'}
+    ${tasks.length ? `<h3 style="margin-top:16px">Tareas</h3><table><tbody>${tasks.map((t) => `<tr><td class="small">Paso ${t.step_number} · ${esc(CHANNEL_LABEL[t.channel])}</td><td class="small">${esc(t.status)}${t.outcome ? ` · ${esc(t.outcome)}` : ''}</td><td class="small muted">${esc(t.note || '')}</td></tr>`).join('')}</tbody></table>` : ''}
     <h3 style="margin-top:16px">Aperturas</h3>
     ${opens.length ? `<table><tbody>${opens.map((o) => `<tr><td class="small">${fmtDate(o.opened_at)}</td><td class="small">${o.suspected_bot ? '<span class="badge warn">bot/escáner</span>' : '<span class="badge ok">humano</span>'}</td><td class="small muted">${esc(o.user_agent)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Sin aperturas.</p>'}
     <h3 style="margin-top:16px">Decisiones (Jev / reglas)</h3>
-    ${decisions.map((d) => `<details><summary>Paso ${d.step_number} · ${esc(d.engine)} · <b>${esc(d.action)}</b> · ${fmtDate(d.created_at)}</summary><pre class="json">${esc(JSON.stringify(d.detail, null, 2))}</pre></details>`).join('') || '<p class="muted">Sin decisiones aún.</p>'}`);
-  const act = (selector, fn) => $(selector, body)?.addEventListener('click', (e) => guard(e.currentTarget, fn));
+    ${decisions.map((d) => `<details><summary>${d.step_number ? `Paso ${d.step_number}` : 'Análisis'} · ${esc(engineLabel(d.engine))} · <b>${esc(d.action)}</b> · ${fmtDate(d.created_at)}</summary><pre class="json">${esc(JSON.stringify(d.detail, null, 2))}</pre></details>`).join('') || '<p class="muted">Sin decisiones aún.</p>'}`);
+  const act = (selector, fn) => $$(selector, body).forEach((b) => b.addEventListener('click', (e) => guard(e.currentTarget, () => fn(e.currentTarget))));
+  act('[data-outcome]', async (b) => { await api(`/prospects/${id}`, { method: 'PATCH', body: { outcome: b.dataset.outcome } }); closeModal(); reload(); });
   act('#p-stop', async () => { await api(`/prospects/${id}`, { method: 'PATCH', body: { status: 'stopped' } }); closeModal(); reload(); });
   act('#p-resume', async () => { await api(`/prospects/${id}`, { method: 'PATCH', body: { status: 'active' } }); closeModal(); reload(); });
   act('#p-delete', async () => { if (!confirm('¿Eliminar prospecto?')) return; await api(`/prospects/${id}`, { method: 'DELETE' }); closeModal(); reload(); });
   act('#p-sim', async () => {
     const r = await api(`/campaigns/${campaign.id}/simulate-decision`, { method: 'POST', body: { prospect_id: id } });
-    const step = campaign.steps.find((s) => s.step_number === r.step_number);
-    const variant = step?.variants.find((v) => v.id === r.decision.variantId);
-    const cta = campaign.ctas.find((x) => x.id === r.decision.ctaId);
-    $('#p-sim-out', body).innerHTML = `<div class="notice info" style="margin-top:10px">Paso ${r.step_number} · motor <b>${esc(r.decision.engine)}</b> → <b>${r.decision.action === 'stop' ? 'detener' : 'enviar'}</b>
-      · variante: ${esc(variant?.label || '—')} · CTA: ${esc(cta?.label || '—')} · franja: ${esc(r.decision.slot || 'cualquiera')}
-      ${r.decision.fitScore !== null && r.decision.fitScore !== undefined ? `· encaje ${Math.round(r.decision.fitScore * 100)}%` : ''}</div>
-      <details><summary class="small">Detalle</summary><pre class="json">${esc(JSON.stringify(r.decision.detail, null, 2))}</pre></details>`;
+    const d = r.decision;
+    $('#p-sim-out', body).innerHTML = `<div class="notice info" style="margin-top:10px">
+      <b>Análisis</b> (${esc(engineLabel(r.analysis.engine))}): segmento <b>${esc(r.analysis.segment || 'ninguno')}</b>${r.analysis.fitScore !== null && r.analysis.fitScore !== undefined ? ` · encaje ${Math.round(r.analysis.fitScore * 100)}%` : ''}${r.analysis.exclude ? ' · <b>se excluiría</b>' : ''}<br>
+      ${d ? `<b>Paso ${r.step_number}</b> (${esc(engineLabel(d.engine))}): variante <b>${esc(d.labels.variant || '—')}</b> · gancho ${esc(d.labels.hook || '—')} · problema ${esc(d.labels.problem || '—')} · CTA ${esc(d.labels.cta || '—')} · franja ${esc(d.slot || 'cualquiera')}` : `El siguiente paso no es un correo.`}</div>
+      <details><summary class="small">Detalle</summary><pre class="json">${esc(JSON.stringify({ analysis: r.analysis.detail, decision: d?.detail }, null, 2))}</pre></details>`;
   });
 }
 
-// --- Stats -------------------------------------------------------------------
-async function renderStats(el, campaign) {
+// --- Approval queue ------------------------------------------------------------
+async function renderApproval(el, campaign) {
+  const { drafts } = await api(`/campaigns/${campaign.id}/drafts?status=pending`);
+  el.innerHTML = `
+    <div class="row between"><p class="muted">Cada correo pasa por el control de calidad. Edita, aprueba o descarta. Al aprobar, se envía dentro de la ventana de envío respetando los límites del sender.</p>
+      ${drafts.length ? '<button class="btn ok" id="approve-all">Aprobar todos los que no tienen errores</button>' : ''}</div>
+    ${drafts.map((d) => `
+      <div class="card" data-draft="${d.id}">
+        <div class="row between"><div><b>${esc([d.first_name, d.last_name].filter(Boolean).join(' ') || d.email)}</b> · <span class="muted small">${esc(d.email)} · ${esc(d.title)} ${d.company ? `en ${esc(d.company)}` : ''}</span></div>
+          <span class="small muted">Paso ${d.step_number} · ${esc(d.segment || 'sin segmento')} · ${validationBadge(d.validation_status)} · desde ${esc(d.sender_email || '—')}</span></div>
+        <div style="margin-top:8px"><label>Asunto</label><input type="text" data-k="subject" value="${esc(d.subject)}" ${d.same_thread ? 'readonly' : ''}></div>
+        <div style="margin-top:8px"><label>Cuerpo <span class="hint">(${d.quality.wordCount} palabras)</span></label><textarea data-k="body" style="min-height:170px;font-family:inherit;font-size:14px">${esc(d.body)}</textarea></div>
+        <div data-quality>${issuesHtml(d.quality.issues, 'Cumple todas las reglas de calidad')}</div>
+        <p class="small muted">Elegido por ${esc(engineLabel(d.decision.engine))}${d.decision.detail?.variant?.confidence ? ` (confianza ${Math.round(d.decision.detail.variant.confidence * 100)}%)` : ''}</p>
+        <div class="row">
+          <button class="btn ok small" data-act="approve">Aprobar</button>
+          <button class="btn ghost small" data-act="save">Guardar cambios y revisar</button>
+          <button class="btn ghost small" data-act="regenerate">Regenerar</button>
+          <button class="btn danger small" data-act="stop">Descartar prospecto</button>
+        </div>
+      </div>`).join('') || '<div class="card empty">No hay correos pendientes de aprobación. 🎉</div>'}`;
+  $('#approve-all')?.addEventListener('click', (e) => guard(e.currentTarget, async () => {
+    const r = await api(`/campaigns/${campaign.id}/drafts/approve-all`, { method: 'POST', body: {} });
+    toast(`${r.approved} aprobados${r.skipped_with_errors ? ` · ${r.skipped_with_errors} con errores siguen pendientes` : ''}`);
+    router();
+  }));
+  $$('[data-draft]', el).forEach((card) => {
+    const id = card.dataset.draft;
+    const values = () => ({ subject: $('[data-k=subject]', card).value, body: $('[data-k=body]', card).value });
+    $$('[data-act]', card).forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+      const act = b.dataset.act;
+      if (act === 'save' || act === 'approve') {
+        const r = await api(`/drafts/${id}`, { method: 'PATCH', body: values() });
+        $('[data-quality]', card).innerHTML = issuesHtml(r.quality.issues, 'Cumple todas las reglas de calidad');
+        if (act === 'save') return toast('Revisado');
+        if (r.quality.errors && !confirm(`Este correo tiene ${r.quality.errors} error(es) de calidad. ¿Enviarlo igualmente?`)) return;
+        await api(`/drafts/${id}/approve`, { method: 'POST', body: { force: Boolean(r.quality.errors) } });
+        toast('Aprobado');
+      } else {
+        await api(`/drafts/${id}/reject`, { method: 'POST', body: { action: act } });
+        toast(act === 'stop' ? 'Prospecto descartado' : 'Se generará un nuevo borrador');
+      }
+      card.remove();
+    })));
+  });
+}
+
+// --- Results -----------------------------------------------------------------------
+async function renderResults(el, campaign) {
   const s = await api(`/campaigns/${campaign.id}/stats`);
   const t = s.totals;
   const pct = (a, b) => (b ? `${Math.round((a / b) * 1000) / 10}%` : '—');
+  const funnel = [['Prospectos', t.prospects], ['Contactados', t.contacted], ['Respondieron', t.replied], ['Interesados', t.interested], ['Reuniones', t.meetings], ['Oportunidades', t.opportunities], ['Cierres', t.won]];
+  const max = Math.max(1, t.prospects);
   el.innerHTML = `
-    <div class="grid4">
-      ${[['Prospectos', t.prospects], ['Contactados', t.contacted], ['Correos enviados', t.sent], ['Apertura', `${t.open_rate}%`], ['Respuesta', `${t.reply_rate}%`], ['Interesados', t.interested], ['Rebote', `${t.bounce_rate}%`], ['Bajas', t.unsubscribed]]
-        .map(([l, v]) => `<div class="stat"><b>${esc(v)}</b><span>${l}</span></div>`).join('')}
+    <div class="card"><h2>Embudo</h2>
+      ${funnel.map(([l, v]) => `<div class="funnel-row"><span>${l}</span><div class="funnel-bar"><div style="width:${Math.max(2, (v / max) * 100)}%"></div></div><b>${v}</b></div>`).join('')}
+      <p class="muted small">Apertura ${t.open_rate}% · respuesta ${t.reply_rate}% · reuniones ${t.meeting_rate}% de los contactados · rebote ${t.bounce_rate}% · ${t.unsubscribed} bajas</p>
+      ${t.bounce_rate > 3 ? '<p class="notice">Rebote superior al 3%: revisa la calidad de la base antes de seguir enviando.</p>' : ''}
     </div>
-    ${t.bounce_rate > 3 ? '<p class="notice" style="margin-top:12px">Rebote superior al 3%: verifica los correos de tu lista antes de seguir enviando para proteger tu dominio.</p>' : ''}
-    <div class="grid2" style="margin-top:16px">
-      <div class="card"><h2>Por paso</h2><table><thead><tr><th>Paso</th><th>Enviados</th><th>Abiertos</th></tr></thead>
-        <tbody>${s.by_step.map((r) => `<tr><td>${r.step_number}</td><td>${r.sent}</td><td>${r.opened} (${pct(r.opened, r.sent)})</td></tr>`).join('') || '<tr><td colspan="3" class="muted">Sin envíos</td></tr>'}</tbody></table></div>
-      <div class="card"><h2>Respuestas</h2><table><tbody>${s.replies.map((r) => `<tr><td>${esc(REPLY_LABEL[r.category] || r.category)}</td><td>${r.n}</td></tr>`).join('') || '<tr><td class="muted">Sin respuestas aún</td></tr>'}</tbody></table>
-        <p class="muted small">Motor de decisiones: ${s.engines.map((e) => `${esc(e.engine)} (${e.n})`).join(', ') || '—'}</p></div>
-    </div>
-    <div class="card"><h2>Variantes (A/B elegido por Jev)</h2><div class="table-wrap"><table><thead><tr><th>Paso</th><th>Variante</th><th>Enviados</th><th>Apertura</th><th>Respuestas</th></tr></thead>
-      <tbody>${s.by_variant.map((v) => `<tr><td>${v.step_number}</td><td>${esc(v.label)}</td><td>${v.sent}</td><td>${pct(v.opened, v.sent)}</td><td>${v.replied} (${pct(v.replied, v.sent)})</td></tr>`).join('')}</tbody></table></div></div>
-    <div class="card"><h2>CTAs</h2><table><thead><tr><th>CTA</th><th>Enviados</th><th>Prospectos que respondieron</th></tr></thead>
-      <tbody>${s.by_cta.map((v) => `<tr><td>${esc(v.label)}</td><td>${v.sent}</td><td>${v.replied}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">Sin CTAs</td></tr>'}</tbody></table></div>`;
+    <div class="card"><h2>Por segmento</h2><div class="table-wrap"><table><thead><tr><th>Segmento</th><th>Prospectos</th><th>Contactados</th><th>Respuestas</th><th>Reuniones</th><th>Encaje medio</th></tr></thead>
+      <tbody>${s.by_segment.map((r) => `<tr><td>${esc(r.segment)}</td><td>${r.prospects}</td><td>${r.contacted}</td><td>${r.replied} (${pct(r.replied, r.contacted)})</td><td>${r.meetings}</td><td>${r.avg_fit === null ? '—' : `${Math.round(r.avg_fit * 100)}%`}</td></tr>`).join('')}</tbody></table></div></div>
+    <div class="card"><h2>Variantes (aprendizaje)</h2><p class="muted small">Jev recibe estos resultados como evidencia al elegir la variante; en modo reglas se favorece la mejor tras 20 envíos por variante.</p>
+      <div class="table-wrap"><table><thead><tr><th>Paso</th><th>Variante</th><th>Segmento</th><th>Enviados</th><th>Apertura</th><th>Respuesta</th><th>Positivas</th></tr></thead>
+      <tbody>${s.by_variant.map((v) => `<tr><td>${v.step_number}</td><td>${esc(v.label)}</td><td>${esc(v.segment || 'todos')}</td><td>${v.sent}</td><td>${pct(v.opened, v.sent)}</td><td>${pct(v.replied, v.sent)}</td><td>${v.positive} (${pct(v.positive, v.sent)})</td></tr>`).join('')}</tbody></table></div></div>
+    <div class="grid2">
+      <div class="card"><h2>CTAs</h2><table><thead><tr><th>CTA</th><th>Enviados</th><th>Respuesta</th><th>Positivas</th></tr></thead>
+        <tbody>${s.by_cta.map((v) => `<tr><td>${esc(v.label)}</td><td>${v.sent}</td><td>${pct(v.replied, v.sent)}</td><td>${v.positive}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">Sin CTAs</td></tr>'}</tbody></table></div>
+      <div class="card"><h2>Respuestas y calidad de la base</h2><table><tbody>
+        ${s.replies.map((r) => `<tr><td>${esc(REPLY_LABEL[r.category] || r.category)}</td><td>${r.n}</td></tr>`).join('') || '<tr><td class="muted">Sin respuestas aún</td></tr>'}
+        ${s.validation.map((r) => `<tr><td>Leads ${esc({ valid: 'válidos', risky: 'riesgosos', invalid: 'inválidos' }[r.status] || r.status)}</td><td>${r.n}</td></tr>`).join('')}</tbody></table>
+        <p class="muted small">Decisiones: ${s.engines.map((e) => `${esc(engineLabel(e.engine))} (${e.n})`).join(', ') || '—'}</p></div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Tasks (cold call / LinkedIn)
+// ---------------------------------------------------------------------------
+async function viewTasks() {
+  const { tasks, outcomes } = await api('/tasks?status=open');
+  app.innerHTML = `
+    <h1>Tareas</h1><p class="muted">Pasos de llamada y LinkedIn de tus secuencias. Al completarlas, la secuencia continúa; una reunión agendada o un "no interesado" la detienen.</p>
+    ${tasks.map((t) => `
+      <div class="card" data-task="${t.id}">
+        <div class="row between"><div><span class="badge">${esc(CHANNEL_LABEL[t.channel])}</span> <b>${esc([t.first_name, t.last_name].filter(Boolean).join(' ') || t.email)}</b> · <span class="muted small">${esc(t.title)} ${t.company ? `en ${esc(t.company)}` : ''}</span></div>
+          <span class="small muted">${esc(t.campaign_name)} · paso ${t.step_number} · ${fmtDate(t.created_at)}</span></div>
+        <p class="small">${t.phone ? `📞 <a href="tel:${esc(t.phone)}">${esc(t.phone)}</a>` : ''} ${t.linkedin_url ? `· <a href="${esc(t.linkedin_url)}" target="_blank" rel="noopener">Perfil de LinkedIn</a>` : ''} · ✉️ ${esc(t.email)}</p>
+        <div class="preview-mail small">${esc(t.instructions)}</div>
+        <div class="row" style="margin-top:10px">
+          <select data-outcome style="width:auto">${Object.entries(outcomes).filter(([k]) => t.channel === 'linkedin' || k !== 'connected').map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join('')}</select>
+          <input type="text" data-note placeholder="Nota (opcional)" style="max-width:280px">
+          <button class="btn small" data-act="done">Completar</button>
+          <button class="btn ghost small" data-act="skip">Omitir</button>
+        </div>
+      </div>`).join('') || '<div class="card empty">No hay tareas pendientes.</div>'}`;
+  $$('[data-task]').forEach((card) => {
+    $$('[data-act]', card).forEach((b) => b.addEventListener('click', () => guard(b, async () => {
+      await api(`/tasks/${card.dataset.task}/complete`, { method: 'POST', body: { outcome: $('[data-outcome]', card).value, note: $('[data-note]', card).value, skip: b.dataset.act === 'skip' } });
+      card.remove();
+      toast('Tarea cerrada');
+    })));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -648,39 +840,41 @@ async function viewSenders() {
 }
 
 // ---------------------------------------------------------------------------
-// Best-practice guide (summary of docs/BEST_PRACTICES.md)
+// Rules & architecture guide (summary of docs/BEST_PRACTICES.md)
 // ---------------------------------------------------------------------------
 function viewGuide() {
+  const rows = (list) => list.map(([a, b]) => `<tr><td><b>${a}</b></td><td>${b}</td></tr>`).join('');
   app.innerHTML = `
-    <h1>Buenas prácticas de cold email</h1>
-    <p class="muted">Resumen aplicado en la herramienta (linter, límites y decisiones de Jev). Detalle y fuentes en <code>docs/BEST_PRACTICES.md</code>.</p>
-    <div class="grid2" style="margin-top:16px">
-      <div class="card guide"><h2>Copy</h2><ul>
-        <li>Corto: 50–125 palabras el primero, menos en follow-ups. Que se lea en menos de 60 segundos.</li>
-        <li>Asunto de 2–6 palabras, en minúsculas, sin "Re:" falsos ni palabras spam.</li>
-        <li>Abre con algo específico del prospecto, no con quién eres tú.</li>
-        <li>Estructura: contexto específico → problema → costo de no actuar → prueba social con métrica → CTA.</li>
-        <li>Una sola petición de baja fricción ("¿te interesa?"), no una reunión de 30 min en el primer correo.</li>
-        <li>Texto plano, como entre colegas. Máximo 1 link; sin imágenes ni adjuntos al inicio.</li></ul></div>
-      <div class="card guide"><h2>Secuencia</h2><ul>
-        <li>~4 toques en total en 2–4 semanas; espaciados de 2–7 días, cada vez más separados.</li>
-        <li>Cada follow-up aporta algo nuevo: prueba social, otro ángulo, recurso, y un cierre (breakup) respetuoso.</li>
-        <li>Los follow-ups van en el mismo hilo (Re:) para dar contexto.</li>
-        <li>Se detiene automáticamente al responder, rebotar o darse de baja.</li>
-        <li>La mayoría de respuestas llegan en el 1.º o 2.º correo: invierte ahí el mayor esfuerzo.</li></ul></div>
-      <div class="card guide"><h2>Entregabilidad</h2><ul>
-        <li>SPF, DKIM y DMARC configurados en el dominio de Google Workspace.</li>
-        <li>Calentamiento del buzón 2–3 semanas; 20–50 envíos/día por buzón; varios buzones para escalar.</li>
-        <li>Envíos espaciados y aleatorios, solo en horario laboral del prospecto.</li>
-        <li>Verifica la lista: rebote &gt; 3% daña tu dominio.</li>
-        <li>Enlace y cabecera de baja de un clic.</li></ul></div>
-      <div class="card guide"><h2>Cómo usa Jev la herramienta</h2><ul>
-        <li><b>A quién:</b> puntúa el encaje con tu ICP (prioriza) y detiene contactos que claramente no encajan.</li>
-        <li><b>Qué mensaje:</b> elige la variante (ángulo) por prospecto y paso según su perfil e interacción.</li>
-        <li><b>Qué CTA:</b> baja fricción para quien no abre; más directo para quien abrió varias veces.</li>
-        <li><b>Cuándo:</b> elige la franja (mañana, mediodía, tarde) según cuándo abrió antes.</li>
-        <li><b>Respuestas:</b> clasifica interesado / no interesado / referido / auto-respuesta / rebote.</li></ul></div>
-    </div>`;
+    <h1>Reglas y arquitectura</h1>
+    <p class="muted">Cómo decide la herramienta y qué revisa el control de calidad en cada correo. Detalle y fuentes en <code>docs/BEST_PRACTICES.md</code>.</p>
+    <div class="card"><h2>Arquitectura de decisión</h2><ol class="guide">
+      <li><b>Importación</b> — CSV o Excel, con origen y base legal obligatorios.</li>
+      <li><b>Validación</b> — formato, dominio con MX, cuentas genéricas/personales, desechables, duplicados y lista de baja. Inválidos se detienen; riesgosos pasan por aprobación.</li>
+      <li><b>Inteligencia comercial</b> — Jev asigna segmento, puntúa el encaje con el ICP y excluye a quien claramente no encaja.</li>
+      <li><b>Generación + control de calidad</b> — Jev elige variante, gancho verificable, hipótesis de problema y CTA; el control de calidad aplica las reglas y decide si va a aprobación.</li>
+      <li><b>Orquestador</b> — correos dentro de la ventana con límites por sender, tareas de llamada y LinkedIn, seguimientos en el mismo hilo.</li>
+      <li><b>Resultados y aprendizaje</b> — respuestas, interés, reuniones, oportunidades y cierres; los resultados por variante vuelven a Jev como evidencia.</li></ol></div>
+    <div class="grid2">
+      <div class="card"><h2>Reglas del asunto</h2><table><tbody>${rows([
+        ['Longitud', 'Preferentemente 3–7 palabras'], ['Personalización', 'Cargo, problema o empresa, cuando sea relevante'],
+        ['Estilo', 'Conversacional, profesional, sin publicidad exagerada'], ['Mayúsculas', 'Escritura normal, sin bloques en MAYÚSCULAS'],
+        ['Signos', 'Sin exclamaciones ni puntuación repetida'], ['Preguntas', 'Permitidas cuando sean naturales'],
+        ['Emojis', 'Desactivados en el primer contacto B2B (error)'], ['Re: / Fwd:', 'Solo en un hilo o reenvío real (error)'],
+        ['Variantes', '2–3 por segmento; Jev elige una por prospecto'],
+      ])}</tbody></table></div>
+      <div class="card"><h2>Reglas del cuerpo</h2><table><tbody>${rows([
+        ['Longitud', 'Objetivo 45–85 palabras; advertencia desde 110'], ['Primer párrafo', 'Contexto real de la persona o su responsabilidad ({{gancho}})'],
+        ['Segundo párrafo', 'Una hipótesis de problema relevante ({{problema}})'], ['Tercer párrafo', 'Una pregunta o propuesta breve ({{cta}})'],
+        ['CTA', 'Máximo una acción principal'], ['Tono', 'Humano, directo, respetuoso, sin exageraciones'],
+        ['Personalización', 'Al menos un elemento relevante, verificable y no trivial'], ['Enlaces', 'Ninguno en el primer correo (error), salvo la baja'],
+        ['Adjuntos', 'No se envían adjuntos'], ['Firma', 'Nombre e identidad reales del remitente (error si falta)'],
+        ['Idioma', 'Español natural adaptado al país y sector'],
+      ])}</tbody></table></div>
+    </div>
+    <div class="card"><h2>Severidades</h2><ul class="guide">
+      <li>⛔ <b>Error</b>: bloquea el envío hasta que una persona edite o confirme.</li>
+      <li>⚠️ <b>Advertencia</b>: el correo va a la cola de aprobación (según el modo de la campaña).</li>
+      <li>ℹ️ <b>Info</b>: sugerencia, no detiene nada.</li></ul></div>`;
 }
 
 // ---------------------------------------------------------------------------
